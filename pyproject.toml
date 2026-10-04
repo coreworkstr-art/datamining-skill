@@ -7,7 +7,7 @@ name = "datamining-skill"
 dynamic = ["version"]
 description = "Local-only, streaming-first data mining toolkit: constant-memory profiling, crash-safe chunked mining, and an MCP server."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = >=3.13">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "DataMining Skill Contributors" }]
