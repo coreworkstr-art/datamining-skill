@@ -37,6 +37,18 @@ ALLOWED_DIRS_ENV = "DATAMINING_SKILL_ALLOWED_DIRS"
 _LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR"]
 
 
+def validate_workspace_path(workspace: Path) -> None:
+    """Validate workspace path doesn't exceed Windows limits."""
+    if os.name == 'nt':
+        max_path_length = 260
+        if len(str(workspace.resolve())) >= max_path_length:
+            # sys.stderr üzerinden loglamak yerine doğrudan exception mesajına ekliyoruz.
+            # Böylece main() içindeki exception handler hatayı temiz bir formatta basacaktır.
+            raise InvalidConfigurationException(
+                f"Workspace path exceeds Windows limit of {max_path_length} characters: {workspace}"
+            )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="datamining-skill",
@@ -141,6 +153,10 @@ def _run_profile(args: argparse.Namespace) -> int:
 
 
 def _run_mine(args: argparse.Namespace) -> int:
+    # Windows 260 character path limit validation
+    workspace_path = Path(args.workspace) if args.workspace else Path.cwd()
+    validate_workspace_path(workspace_path)
+
     fields = [name.strip() for name in args.fields.split(",")] if args.fields else None
     summary = run_mining(
         args.source,
@@ -174,8 +190,14 @@ CUSTOM_PATTERN_WARNING = (
 def _run_mcp(args: argparse.Namespace) -> int:
     if args.allow_custom_patterns:
         print(CUSTOM_PATTERN_WARNING, file=sys.stderr)  # stderr: stdout is the protocol channel
+    
+    # MCP server workspace is the first allowed dir, validate it if on Windows
+    allowed_dirs = _allowed_dirs(args.allow_dir)
+    if allowed_dirs:
+        validate_workspace_path(allowed_dirs[0])
+
     server = create_mcp_server(
-        _allowed_dirs(args.allow_dir), allow_custom_patterns=args.allow_custom_patterns
+        allowed_dirs, allow_custom_patterns=args.allow_custom_patterns
     )
     try:
         serve_stdio(server)
@@ -237,6 +259,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     except UnsupportedDataFormatException as exc:
         return _fail(str(exc), EXIT_UNSUPPORTED, args.debug)
     except DataMiningException as exc:
+        # InvalidConfigurationException inherits from DataMiningException, 
+        # so this block will catch it and return EXIT_FAILURE (3).
         return _fail(str(exc), EXIT_FAILURE, args.debug)
     except OSError as exc:
         if _is_closed_pipe(exc):
