@@ -47,7 +47,7 @@ jobs:
 
       - name: Resource-leak gate (dev mode, unclosed files and connections fail the run)
         if: matrix.python-version == '3.14'
-        run: python -E dev -m pytest -q -p nocacheprovider -W error::ResourceWarning -W error::pytest.PytestUnraisableExceptionWarning
+        run: python -X dev -m pytest -q -p nocacheprovider -W error::ResourceWarning -W error::pytest.PytestUnraisableExceptionWarning
 
   packages:
     name: Build and smoke-test the wheel
