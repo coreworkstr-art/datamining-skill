@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "datamining-skill"
+dynamic = ["version"]
+description = "Local-only, streaming-first data mining toolkit: constant-memory profiling, crash-safe chunked mining, and an MCP server."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "DataMining Skill Contributors" }]
+maintainers = [{ name = "DataMining Skill Contributors" }]
+keywords = [
+    "data-mining", "profiling", "streaming", "privacy", "local-first",
+    "mcp", "model-context-protocol", "claude", "csv", "jsonl",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Utilities",
+    "Typing :: Typed",
+]
+# Runtime has zero third-party dependencies by design (the MCP server is stdlib-only).
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.10",
+    "pytest>=8.0",
+    "memory-profiler>=0.61",
+]
+
+[project.scripts]
+datamining-skill = "datamining_skill.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "datamining_skill._version.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+datamining_skill = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "memory: verifies the constant-memory guarantee using memory-profiler (generates a large scratch file)",
+]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+files = ["src", "tests", "scripts"]
+
+[[tool.mypy.overrides]]
+module = ["memory_profiler", "memory_profiler.*"]
+ignore_missing_imports = true

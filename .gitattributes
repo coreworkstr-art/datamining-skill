@@ -1,0 +1,5 @@
+# Keep line endings identical on every platform (the test suite compares bytes, and the
+# CI matrix includes Windows runners that would otherwise check out CRLF).
+* text=auto eol=lf
+*.png binary
+*.gz binary

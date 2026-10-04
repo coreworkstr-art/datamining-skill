@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.mypy_cache/
+.pytest_cache/
+
+# Generated datasets and test scratch space (never commit data)
+data/
+.scratch/
+*.csv
+*.jsonl
+!tests/fixtures/**
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Chunk state databases (metadata only, but still local run artefacts)
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm

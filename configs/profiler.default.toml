@@ -1,0 +1,14 @@
+# Default profiler settings. Pass with:  datamining-skill profile FILE --config configs/profiler.default.toml
+# Every buffer the profiler allocates is bounded by these values; peak memory therefore
+# depends on this file, never on the size of the dataset being profiled.
+
+[profiler]
+chunk_size_bytes = 65536          # raw read buffer (64 KiB)
+head_sample_bytes = 1048576       # head sample for encoding + structure detection (1 MiB)
+max_line_bytes = 1048576          # longest line held in memory; the rest is skipped (1 MiB)
+structure_sample_records = 1000   # records inspected for columns / keys
+estimation_windows = 8            # windows sampled when extrapolating record counts (>= 2)
+window_bytes = 262144             # size of each estimation window (256 KiB)
+exact_count_max_bytes = 16777216  # files up to this size are counted exactly (16 MiB)
+min_format_confidence = 0.6       # reject formats below this confidence
+max_fields = 1024                 # cap on distinct columns / keys tracked
