@@ -1,29 +1,28 @@
-name: CI
+﻿name: CI
 
 on:
   push:
   pull_request:
   workflow_dispatch:
 
-# Least privilege: the workflow only needs to read the repository.
 permissions:
   contents: read
 
-# A newer push to the same branch/PR supersedes the run in progress.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   test:
     name: test (${{ matrix.os }}, Python ${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ["3.13", "3.14"]
+
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -47,14 +46,13 @@ jobs:
         run: python -m pytest -ra --durations=10
 
       - name: Resource-leak gate (dev mode, unclosed files and connections fail the run)
-        if: matrix.python-version == run: python -X dev -m pytest -q -p no:cacheprovider -W error::ResourceWarning -W error::pytest.PytestUnraisableExceptionWarning
+        if: matrix.python-version == '3.14'
+        run: python -E dev -m pytest -q -p nocacheprovider -W error::ResourceWarning -W error::pytest.PytestUnraisableExceptionWarning
 
-  package:
-    # Builds the distribution and proves the *installed wheel* works in a clean
-    # environment with no development dependencies.
-    name: build and smoke-test the wheel
+  packages:
+    name: Build and smoke-test the wheel
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -62,29 +60,31 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: - name: Build sdist and wheel
+          python-version: "3.13"
+
+      - name: Build wheel
         run: |
           python -m pip install --upgrade pip build twine
           python -m build
           python -m twine check dist/*
 
-      - name: Install the wheel into a clean virtual environment
+      - name: Test wheel install
         run: |
           python -m venv "$RUNNER_TEMP/clean"
           "$RUNNER_TEMP/clean/bin/python" -m pip install dist/*.whl
-          "$RUNNER_TEMP/clean/bin/python" -m pip list --format=freeze
+          "$RUNNER_TEMP/clean/bin/python" -m pip list
 
-      - name: Runtime has no third-party dependencies
+      - name: Check dependencies
         run: |
-          deps="$("$RUNNER_TEMP/clean/bin/python" -m pip list --format=freeze | grep -v -E '^(datamining-skill|pip|setuptools|wheel)==' || true)"
-          if [ -n "$deps" ]; then echo "unexpected runtime dependencies:"; echo "$deps"; exit 1; fi
+          DEPS=$("$RUNNER_TEMP/clean/bin/python" -m pip list --format=freeze | grep -v -E "^(datamining-skill|pip|setuptools|wheel)==") || true
+          if [ -n "$DEPS" ]; then echo "unexpected runtime dependencies:"; echo "$DEPS"; exit 1; fi
 
-      - name: Console script and MCP smoke test
+      - name: Console script test
         run: |
-          "$RUNNER_TEMP/clean/bin/datamining-skill" --help
+          "$RUNNER_TEMP/clean/bin/python" -m datamining_skill --help
           "$RUNNER_TEMP/clean/bin/python" scripts/mcp_smoke_test.py "$RUNNER_TEMP/clean/bin/datamining-skill"
 
-      - name: Upload distributions
+      - name: Upload dist artifacts
         uses: actions/upload-artifact@v4
         with:
           name: dist
