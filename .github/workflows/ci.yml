@@ -23,7 +23,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        python-version: ["3.13", "3.14"]
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -47,8 +47,7 @@ jobs:
         run: python -m pytest -ra --durations=10
 
       - name: Resource-leak gate (dev mode, unclosed files and connections fail the run)
-        if: matrix.python-version == '3.12'
-        run: python -X dev -m pytest -q -p no:cacheprovider -W error::ResourceWarning -W error::pytest.PytestUnraisableExceptionWarning
+        if: matrix.python-version == run: python -X dev -m pytest -q -p no:cacheprovider -W error::ResourceWarning -W error::pytest.PytestUnraisableExceptionWarning
 
   package:
     # Builds the distribution and proves the *installed wheel* works in a clean
@@ -63,9 +62,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-
-      - name: Build sdist and wheel
+          python-version: - name: Build sdist and wheel
         run: |
           python -m pip install --upgrade pip build twine
           python -m build

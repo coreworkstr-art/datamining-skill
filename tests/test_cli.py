@@ -170,7 +170,7 @@ def test_the_module_entry_point_runs() -> None:
     )
 
     assert result.returncode == 0
-    assert all(command in result.stdout.replace(\r\n, \n) for command in ("profile", "mine", "mcp"))
+    assert all(command in result.stdout.replace("\r\n", "\n").replace(\r\n, \n) for command in ("profile", "mine", "mcp"))
 
 
 
@@ -285,11 +285,11 @@ def test_a_closed_output_pipe_exits_quietly_with_141(state_dir: Path) -> None:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    assert process.stdout.replace(\r\n, \n) is not None and process.stderr.replace(\r\n, \n) is not None
-    process.stdout.replace(\r\n, \n).close()  # the reader (think `| head -0`) goes away before anything is written
-    stderr = process.stderr.replace(\r\n, \n).read()
+    assert process.stdout.replace("\r\n", "\n").replace(\r\n, \n) is not None and process.stderr.replace("\r\n", "\n").replace(\r\n, \n) is not None
+    process.stdout.replace("\r\n", "\n").replace(\r\n, \n).close()  # the reader (think `| head -0`) goes away before anything is written
+    stderr = process.stderr.replace("\r\n", "\n").replace(\r\n, \n).read()
     process.wait(timeout=60)
-    process.stderr.replace(\r\n, \n).close()
+    process.stderr.replace("\r\n", "\n").replace(\r\n, \n).close()
 
     assert process.returncode == 141
     assert b"Traceback" not in stderr and b"Exception ignored" not in stderr
