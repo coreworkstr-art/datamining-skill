@@ -7,14 +7,13 @@ name = "datamining-skill"
 dynamic = ["version"]
 description = "Local-only, streaming-first data mining toolkit: constant-memory profiling, crash-safe chunked mining, and an MCP server."
 readme = "README.md"
-requires-python = >=3.13">=3.11"
-license = "MIT"
-license-files = ["LICENSE"]
+requires-python = ">=3.11"
+license = {text = "MIT"}
 authors = [{ name = "DataMining Skill Contributors" }]
 maintainers = [{ name = "DataMining Skill Contributors" }]
 keywords = [
     "data-mining", "profiling", "streaming", "privacy", "local-first",
-    "mcp", "model-context-protocol", "claude", "csv", "jsonl",
+    "mcp", "model-context-protocol", "claude", "csv", "jsonl"
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
