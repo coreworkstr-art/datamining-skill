@@ -378,4 +378,4 @@ issues privately as described in [SECURITY.md](SECURITY.md). Changes are recorde
 
 ## License
 
-MIT. See [LICENSE](LICENSE). Copyright (c) 2026 DataMining Skill Contributors.
+MIT. See [LICENSE](LICENSE). Copyright (c) 2026 DataMining Skill Contributors. CoreWorks Koray Uğrik
