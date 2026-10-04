@@ -170,7 +170,9 @@ def test_the_module_entry_point_runs() -> None:
     )
 
     assert result.returncode == 0
-    assert all(command in result.stdout for command in ("profile", "mine", "mcp"))
+    assert all(command in result.stdout.replace(
+, 
+) for command in ("profile", "mine", "mcp"))
 
 
 
