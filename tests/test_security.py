@@ -439,7 +439,9 @@ def test_no_network_capable_module_is_even_loaded(env: Env) -> None:
         "msgs = [{'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {'protocolVersion': '2025-06-18'}},\n"
         "        {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/call', 'params': {'name': 'profile_dataset', 'arguments': {'path': 'ok.csv'}}}]\n"
         "create_mcp_server([ws]).serve(io.StringIO('\\n'.join(map(json.dumps, msgs)) + '\\n'), io.StringIO())\n"
-        f"print(json.dumps(sorted(m for m in sys.modules if m in {sorted(NETWORK_MODULES)!r} or m.split('.')[0] in {sorted(NETWORK_MODULES)!r})))\n"
+        # urllib.parse is string handling only; pathlib imports it before Python 3.13
+        f"loaded = (m for m in sys.modules if m in {sorted(NETWORK_MODULES)!r} or m.split('.')[0] in {sorted(NETWORK_MODULES)!r})\n"
+        "print(json.dumps(sorted(m for m in loaded if m not in ('urllib', 'urllib.parse'))))\n"
     )
 
     result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=False, timeout=120)
