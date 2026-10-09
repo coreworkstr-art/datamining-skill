@@ -18,7 +18,7 @@ These properties are the point of the project; changes must preserve them.
 
 1. **Local-only.** No network access, no telemetry, no calls to external services.
 2. **Zero runtime dependencies.** The package installs with nothing but the standard
-   library. Development tools (`pytest`, `mypy`, `memory-profiler`) live under the `dev`
+   library. Development tools (`pytest`, `mypy`, `memory-profiler`, `ruff`) live under the `dev`
    extra only. A new runtime dependency needs a strong justification in the pull request.
 3. **Constant memory.** Anything that touches data must stream: generators, bounded
    buffers, no accumulation proportional to file size.
@@ -46,12 +46,13 @@ pip install -e ".[dev]"
 Run the same checks as CI before opening a pull request:
 
 ```bash
+python -m ruff check .             # lint
 python -m mypy                     # strict type checking: src, tests, scripts
 python -m pytest                   # the full suite
 python -m pytest -m "not memory"   # skip the one 256 MiB memory test while iterating
 ```
 
-CI runs both on Linux, macOS and Windows with Python 3.11-3.14, then builds the package and
+CI runs all three on Linux, macOS and Windows with Python 3.11-3.14, then builds the package and
 smoke-tests the installed wheel. A pull request must be green on all of them.
 
 ## Architecture in one minute
@@ -75,11 +76,20 @@ engine, state manager or the mining pipeline.
 
 * **A new file format:** implement `FormatHandler` (`analyze()` over a line iterator), return
   a confidence, and register it through `create_profiler(extra_handlers=...)`.
-* **New mining logic:** implement `ExtractionStrategy` (`fields` and `extract(line)`); it must
-  do no I/O. Prefer bounded regex quantifiers: strategies run on hostile input.
+* **New mining logic:** implement `ExtractionStrategy` (`fields` and
+  `extract(line, start=0, stop=None)`); it must do no I/O. Accepting `start` and `stop` makes it
+  exact on lines longer than the reader's cap (it reports only matches that begin in
+  `[start, stop)`); `extract(line)` alone also works. Prefer bounded regex quantifiers:
+  strategies run on hostile input. A strategy whose matches can never contain a line break may set
+  `line_independent = True` to receive blocks of lines, but it must then give the same result as
+  line-by-line searching; see `tests/test_blocks.py` for the differential test to copy.
 * **A new output format:** implement `RecordFormatter` and select it in `create_orchestrator`.
 * **A new MCP tool:** declare it in `infrastructure/mcp_tools.py`, validate its arguments,
-  confine every path through `WorkspacePolicy`, and add tests, including abuse cases.
+  confine every path through `WorkspacePolicy`, and add tests, including abuse cases. Document it
+  in `docs/mcp-tools.md` and `skills/datamining/SKILL.md`; `tests/test_packaging.py` fails until
+  both mention every tool and argument.
+* **A new command-line option:** add it to `cli.py`, to the option table of the README (a test
+  checks that every option is documented) and to `CHANGELOG.md`.
 
 ## Code standards
 
@@ -103,6 +113,25 @@ engine, state manager or the mining pipeline.
 * Crash behaviour is tested by injecting failures at specific points, including a real
   hard exit in a child process. New persistence code needs the same treatment.
 * Never put raw binary data in `parametrize` values (use `pytest.param(..., id=...)`).
+
+## Releasing
+
+Maintainers only. A release is a tag; everything else is automated.
+
+1. Move the `[Unreleased]` entries of `CHANGELOG.md` under a new `## [X.Y.Z] - date` heading and
+   set `__version__` in `src/datamining_skill/_version.py` and `"version"` in
+   `.claude-plugin/plugin.json` to `X.Y.Z` (a test checks that they agree).
+2. Merge to `main` once CI is green, then tag it: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+3. The `Release` workflow builds the sdist and wheel, verifies the tag against the version and the
+   changelog, creates the GitHub release with the changelog section as its notes, and publishes
+   to PyPI **if** the repository variable `PUBLISH_TO_PYPI` is `true`.
+
+PyPI publishing uses [trusted publishing](https://docs.pypi.org/trusted-publishers/), so no token is
+stored. Set it up once: on PyPI add a pending publisher for the project `datamining-skill`
+(owner `coreworkstr-art`, repository `datamining-skill`, workflow `release.yml`, environment `pypi`),
+create the `pypi` environment under the repository's *Settings, Environments* (add a required
+reviewer if you want a manual gate), and set the variable `PUBLISH_TO_PYPI` to `true` under
+*Settings, Secrets and variables, Actions, Variables*.
 
 ## Pull requests
 

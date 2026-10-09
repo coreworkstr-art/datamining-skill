@@ -1,0 +1,12 @@
+# Everything a source distribution needs to be built, tested and understood on its own.
+include LICENSE README.md CHANGELOG.md CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md
+include pyproject.toml MANIFEST.in .gitattributes
+recursive-include docs *.md
+recursive-include examples *.csv *.md
+recursive-include configs *.toml
+recursive-include scripts *.py
+recursive-include tests *.py
+recursive-include skills *.md
+recursive-include .claude-plugin *.json
+global-exclude *.py[cod] __pycache__ *.sqlite3 *.sqlite3-wal *.sqlite3-shm
+prune .scratch

@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -12,11 +13,37 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
 jobs:
+  lint:
+    name: lint (ruff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install ruff
+        run: python -m pip install ruff
+
+      - name: Lint
+        run: ruff check .
+
   test:
     name: test (${{ matrix.os }}, Python ${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -25,10 +52,12 @@ jobs:
 
     steps:
       - name: Check out
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -50,42 +79,48 @@ jobs:
         run: python -X dev -m pytest -q -p no:cacheprovider -W error::ResourceWarning -W error::pytest.PytestUnraisableExceptionWarning -W error::pytest.PytestUnhandledThreadExceptionWarning
 
   packages:
-    name: Build and smoke-test the wheel
+    name: Build and smoke-test the distributions
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Check out
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.13"
 
-      - name: Build wheel
+      - name: Build the source distribution and the wheel
         run: |
           python -m pip install --upgrade pip build twine
           python -m build
-          python -m twine check dist/*
+          python -m twine check --strict dist/*
 
-      - name: Test wheel install
+      - name: Check what the distributions contain
+        run: python scripts/check_distributions.py dist
+
+      - name: Install the wheel into a clean environment
         run: |
           python -m venv "$RUNNER_TEMP/clean"
           "$RUNNER_TEMP/clean/bin/python" -m pip install dist/*.whl
           "$RUNNER_TEMP/clean/bin/python" -m pip list
 
-      - name: Check dependencies
+      - name: Check that the runtime has no dependencies
         run: |
           DEPS=$("$RUNNER_TEMP/clean/bin/python" -m pip list --format=freeze | grep -v -E "^(datamining-skill|pip|setuptools|wheel)==") || true
           if [ -n "$DEPS" ]; then echo "unexpected runtime dependencies:"; echo "$DEPS"; exit 1; fi
 
-      - name: Console script test
+      - name: Smoke-test the console script
         run: |
+          "$RUNNER_TEMP/clean/bin/datamining-skill" --version
           "$RUNNER_TEMP/clean/bin/python" -m datamining_skill --help
           "$RUNNER_TEMP/clean/bin/python" scripts/mcp_smoke_test.py "$RUNNER_TEMP/clean/bin/datamining-skill"
 
-      - name: Upload dist artifacts
-        uses: actions/upload-artifact@v7
+      - name: Upload the distributions
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: dist
           path: dist/

@@ -1,0 +1,26 @@
+{
+  "name": "datamining-skill",
+  "displayName": "DataMining Skill",
+  "version": "0.2.0",
+  "description": "Mine very large CSV, JSON, JSONL and log files privately on this machine: profile a file, extract e-mail addresses or any pattern into a clean result, and check it, with crash-safe resume and constant memory.",
+  "author": {
+    "name": "DataMining Skill Contributors"
+  },
+  "homepage": "https://github.com/coreworkstr-art/datamining-skill",
+  "repository": "https://github.com/coreworkstr-art/datamining-skill",
+  "license": "MIT",
+  "keywords": ["data-mining", "csv", "jsonl", "logs", "email-extraction", "mcp", "local-first", "privacy"],
+  "mcpServers": {
+    "datamining": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "datamining-skill",
+        "mcp",
+        "--allow-dir",
+        "${CLAUDE_PROJECT_DIR}"
+      ]
+    }
+  }
+}

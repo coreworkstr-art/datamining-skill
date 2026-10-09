@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/coreworkstr-art/datamining-skill/security/advisories/new
+    about: Please report security problems privately, never in a public issue.
+  - name: Troubleshooting guide
+    url: https://github.com/coreworkstr-art/datamining-skill/blob/main/docs/troubleshooting.md
+    about: Common messages and how to resolve them.

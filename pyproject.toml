@@ -5,20 +5,23 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "datamining-skill"
 dynamic = ["version"]
-description = "Local-only, streaming-first data mining toolkit: constant-memory profiling, crash-safe chunked mining, and an MCP server."
+description = "Mine huge CSV, JSON, JSONL and log files on a small machine, privately: constant-memory profiling, crash-safe chunked extraction, and an MCP server for AI assistants."
 readme = "README.md"
 requires-python = ">=3.11"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "DataMining Skill Contributors" }]
 maintainers = [{ name = "DataMining Skill Contributors" }]
 keywords = [
-    "data-mining", "profiling", "streaming", "privacy", "local-first",
-    "mcp", "model-context-protocol", "claude", "csv", "jsonl"
+    "data-mining", "profiling", "streaming", "privacy", "local-first", "email-extraction",
+    "mcp", "model-context-protocol", "claude", "claude-code", "csv", "jsonl", "log-analysis",
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Natural Language :: English",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.11",
@@ -26,6 +29,7 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Libraries",
+    "Topic :: Text Processing",
     "Topic :: Utilities",
     "Typing :: Typed",
 ]
@@ -37,7 +41,15 @@ dev = [
     "mypy>=1.10",
     "pytest>=8.0",
     "memory-profiler>=0.61",
+    "ruff>=0.6",
 ]
+
+[project.urls]
+Homepage = "https://github.com/coreworkstr-art/datamining-skill"
+Documentation = "https://github.com/coreworkstr-art/datamining-skill#readme"
+Source = "https://github.com/coreworkstr-art/datamining-skill"
+Issues = "https://github.com/coreworkstr-art/datamining-skill/issues"
+Changelog = "https://github.com/coreworkstr-art/datamining-skill/blob/main/CHANGELOG.md"
 
 [project.scripts]
 datamining-skill = "datamining_skill.cli:main"
@@ -67,3 +79,23 @@ files = ["src", "tests", "scripts"]
 [[tool.mypy.overrides]]
 module = ["memory_profiler", "memory_profiler.*"]
 ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = [".scratch"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF", "PT", "S", "BLE"]
+ignore = [
+    "PT018",  # composite assertions read better than split ones in these tests
+    "SIM105",  # contextlib.suppress would hide which exceptions a block expects
+    "S311",  # random is used for reproducible test data, never for secrets
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "BLE001", "E501"]  # long literals and assertions read better unbroken
+"scripts/**" = ["S", "BLE001", "E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["datamining_skill", "tests"]

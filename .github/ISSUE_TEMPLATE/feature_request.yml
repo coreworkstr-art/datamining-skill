@@ -1,0 +1,28 @@
+name: Feature request
+description: Suggest an improvement or a new capability
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: Describe the task and the data (kind of file, rough size), not only the feature you have in mind.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What do you do today instead?
+  - type: checkboxes
+    id: principles
+    attributes:
+      label: This project stays local-only, dependency-free and constant-memory
+      options:
+        - label: My request fits those principles (no network, no runtime dependencies, bounded memory)
+          required: true

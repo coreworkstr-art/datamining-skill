@@ -1,0 +1,58 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting this. **Do not attach real or sensitive data.** A small synthetic
+        file that reproduces the problem is ideal. For security problems use the private
+        reporting link on the issue chooser instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How can it be reproduced?
+      description: The exact command (`datamining-skill ...`), Python call or MCP tool call with its arguments, and a description of the input file (format, size, encoding).
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output or error message
+      description: Add `--debug` to a command to include the traceback.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `datamining-skill --version`
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: [Windows, macOS, Linux, Other]
+    validations:
+      required: true
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      description: Output of `python --version`
+    validations:
+      required: true
+  - type: dropdown
+    id: how
+    attributes:
+      label: How do you use it?
+      options: [Command line, Python library, MCP server in Claude Code, MCP server in Claude Desktop, MCP server in Cursor, Other MCP client]
+    validations:
+      required: true

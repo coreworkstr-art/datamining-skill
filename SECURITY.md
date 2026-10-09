@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Security fixes are made to the latest released minor version (currently the 0.1 series).
+Security fixes are made to the latest released minor version (currently the 0.2 series).
 
 ## Reporting a vulnerability
 
@@ -32,6 +32,9 @@ These areas are in scope:
 * **Memory and CPU exhaustion** from crafted input (for example, a file or MCP message that
   makes memory grow with its size, or a built-in pattern that backtracks catastrophically).
 * **Code execution:** anything that evaluates data or executes content of a dataset.
+* **Decompression and conversion:** a compressed or UTF-16 file that makes the conversion use
+  memory, or disk beyond its documented limits, leave a partial or readable-by-others copy, or
+  write outside the job's scratch folder.
 * **Data leakage:** file contents or absolute paths appearing in logs, error messages or
   MCP results; files left in shared temporary directories.
 * **Crash-safety violations:** a sequence of crashes that loses, duplicates or corrupts
