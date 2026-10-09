@@ -2,7 +2,7 @@
   "name": "datamining-skill",
   "displayName": "DataMining Skill",
   "version": "0.2.0",
-  "description": "Mine very large CSV, JSON, JSONL and log files privately on this machine: profile a file, extract e-mail addresses or any pattern into a clean result, and check it, with crash-safe resume and constant memory.",
+  "description": "Extract data, such as e-mail addresses, from very large CSV, JSON, JSON Lines and log files on your own machine: profile a file, mine it into a result and check the result. An interrupted run resumes where it stopped.",
   "author": {
     "name": "DataMining Skill Contributors"
   },

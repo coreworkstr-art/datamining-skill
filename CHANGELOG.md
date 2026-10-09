@@ -60,7 +60,7 @@ All notable changes are recorded here. The format follows
   "strictly" confined access, or a single record never lost in any failure). It gained a note on
   processing personal data and a statement that the project is not affiliated with the clients it
   names. Two stale details in the documentation were corrected (a broken link, the list of format
-  handlers).
+  handlers). The package, plugin and marketplace descriptions use the same plainer wording.
 - Docstrings and comments were condensed and point to `docs/architecture.md`; test and script
   fixtures use reserved `.test` domains and enterprise-style sample data.
 

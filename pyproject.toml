@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "datamining-skill"
 dynamic = ["version"]
-description = "Mine huge CSV, JSON, JSONL and log files on a small machine, privately: constant-memory profiling, crash-safe chunked extraction, and an MCP server for AI assistants."
+description = "Command-line tool, Python library and MCP server for extracting data, such as e-mail addresses, from very large CSV, JSON and log files on your own machine, in bounded memory."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"

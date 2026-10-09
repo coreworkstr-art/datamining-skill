@@ -1,6 +1,6 @@
 {
   "name": "datamining-skill",
-  "description": "Private, local data mining for large CSV, JSON, JSONL and log files",
+  "description": "Extract data from very large local CSV, JSON, JSON Lines and log files",
   "owner": {
     "name": "DataMining Skill Contributors"
   },
@@ -8,7 +8,7 @@
     {
       "name": "datamining-skill",
       "source": "./",
-      "description": "Profile huge data files, extract e-mail addresses or any pattern into a clean result, and check it, entirely on this machine"
+      "description": "Profile a large data file, extract e-mail addresses or your own pattern into a result, and check it. Everything runs on this machine."
     }
   ]
 }
