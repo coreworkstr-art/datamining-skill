@@ -1,8 +1,10 @@
-"""The MCP tools ``profile_dataset`` and ``mine_dataset``, and all validation of model-supplied input.
+"""The MCP tools and all validation of model-supplied input.
 
-Covers tool declarations, a small argument validator for exactly these schemas, and the
-``WorkspacePolicy`` path confinement. JSON-RPC lives in ``mcp_server``; the profiler and mining
-runner are injected (see docs/architecture.md, "MCP server").
+Five tools: ``profile_dataset``, ``mine_dataset``, ``mining_status``, ``cancel_mining`` and
+``preview_result``. This module holds their declarations, a small argument validator for
+exactly these schemas, and the ``WorkspacePolicy`` path confinement. JSON-RPC lives in
+``mcp_server``; the profiler and mining runner are injected (see docs/architecture.md,
+"MCP server").
 """
 
 from __future__ import annotations
@@ -15,15 +17,30 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from datamining_skill.application.extraction_strategy import vet_pattern
+from datamining_skill.application.extraction_strategy import RegexExtractor, vet_pattern
 from datamining_skill.application.orchestrator import MiningProgress, MiningSummary
 from datamining_skill.application.support import describe_failure
 from datamining_skill.domain.exceptions import DataMiningException, InvalidConfigurationException
+from datamining_skill.infrastructure.mcp_jobs import (
+    JobAlreadyRunningError,
+    MiningJobs,
+    TooManyJobsError,
+    summary_data,
+)
 from datamining_skill.infrastructure.paths import check_path_text, resolve_within
 from datamining_skill.infrastructure.permissions import ensure_private_directory
+from datamining_skill.infrastructure.result_preview import (
+    DEFAULT_PREVIEW_ROWS,
+    MAX_PREVIEW_ROWS,
+    preview_result,
+)
 
 TOOL_PROFILE = "profile_dataset"
 TOOL_MINE = "mine_dataset"
+TOOL_STATUS = "mining_status"
+TOOL_CANCEL = "cancel_mining"
+TOOL_PREVIEW = "preview_result"
+_RESULT_SUFFIXES = (".csv", ".jsonl", ".ndjson")
 
 MAX_PATH_CHARS = 4096
 MAX_PATTERN_CHARS = 512
@@ -47,6 +64,8 @@ class MineRunner(Protocol):
         fields: Sequence[str] | None,
         overwrite: bool,
         csv_formula_guard: bool,
+        lowercase: bool,
+        unique: bool,
         on_progress: Callable[[MiningProgress], None] | None,
     ) -> MiningSummary: ...
 
@@ -163,11 +182,63 @@ def _profile_schema() -> dict[str, Any]:
                 "type": "string",
                 "maxLength": MAX_PATH_CHARS,
                 "description": (
-                    "File to inspect (CSV, TSV, JSONL/NDJSON or log). Relative paths are "
-                    "resolved against the workspace directory; the file must be inside an "
-                    "allowed directory."
+                    "File to inspect (CSV, TSV, JSON, JSONL/NDJSON or log; also gzip, bzip2, "
+                    "xz or zip compressed). Relative paths are resolved against the workspace "
+                    "directory; the file must be inside an allowed directory."
                 ),
             }
+        },
+        "required": ["path"],
+        "additionalProperties": False,
+    }
+
+
+def _status_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "job_id": {
+                "type": "string",
+                "maxLength": 64,
+                "description": "The job_id returned by mine_dataset. Omit it to list all jobs.",
+            }
+        },
+        "additionalProperties": False,
+    }
+
+
+def _cancel_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "job_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "description": "The job_id returned by mine_dataset.",
+            }
+        },
+        "required": ["job_id"],
+        "additionalProperties": False,
+    }
+
+
+def _preview_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "maxLength": MAX_PATH_CHARS,
+                "description": "A result file written by mine_dataset (.csv, .jsonl or .ndjson).",
+            },
+            "rows": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": MAX_PREVIEW_ROWS,
+                "default": DEFAULT_PREVIEW_ROWS,
+                "description": "How many records to return.",
+            },
         },
         "required": ["path"],
         "additionalProperties": False,
@@ -205,6 +276,31 @@ def _mine_schema(allow_custom_patterns: bool) -> dict[str, Any]:
                 "do not execute them as formulas. Changes those values."
             ),
         },
+        "lowercase": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Lower-case every extracted value. With unique, e-mail addresses that differ "
+                "only in case count as one."
+            ),
+        },
+        "unique": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Keep only the first occurrence of each extracted record, across the whole file "
+                "and across resumed runs. Without it every occurrence is written."
+            ),
+        },
+        "wait": {
+            "type": "boolean",
+            "default": True,
+            "description": (
+                "Wait for the run and return its summary (default). Set false for a very large "
+                "file: the run then continues in the background and the result is a job_id to "
+                "poll with mining_status."
+            ),
+        },
     }
     if allow_custom_patterns:
         properties["pattern"] = {
@@ -214,7 +310,8 @@ def _mine_schema(allow_custom_patterns: bool) -> dict[str, Any]:
                 "Python regular expression to extract instead of e-mail addresses. Each match "
                 "(or the tuple of its capture groups) becomes one output row. Use bounded "
                 "quantifiers such as {1,64}; patterns with nested unbounded quantifiers like "
-                "(a+)+ are rejected because they can hang the machine."
+                "(a+)+ are rejected because they can hang the machine. A repeated capturing "
+                "group such as (\\d+\\.){3} is rejected too: write (?:\\d+\\.){3}."
             ),
         }
         properties["fields"] = {
@@ -262,6 +359,13 @@ def _check_value(name: str, spec: Mapping[str, Any], value: Any) -> str | None:
     elif kind == "boolean":
         if not isinstance(value, bool):
             return f"'{name}' must be true or false"
+    elif kind == "integer":
+        if isinstance(value, bool) or not isinstance(value, int):
+            return f"'{name}' must be an integer"
+        if value < spec.get("minimum", value):
+            return f"'{name}' must be at least {spec['minimum']}"
+        if value > spec.get("maximum", value):
+            return f"'{name}' must be at most {spec['maximum']}"
     elif kind == "array":
         if not isinstance(value, list):
             return f"'{name}' must be an array"
@@ -298,16 +402,18 @@ class MiningTools:
         self._mine = mine
         self._allow_custom_patterns = allow_custom_patterns
         self._logger = logger or logging.getLogger(__name__)
+        self._jobs = MiningJobs(self._logger)
         self._definitions = (
             ToolDefinition(
                 name=TOOL_PROFILE,
                 title="Profile a data file",
                 description=(
-                    "Inspect a local data file (CSV, TSV, JSONL/NDJSON or log) without reading "
-                    "it fully into memory. Returns the size, encoding, detected format, column "
-                    "names or JSON keys, and an estimated record count. Runs entirely on this "
-                    "machine in constant memory, so it is safe for very large files. Use it "
-                    "before mine_dataset to understand a file."
+                    "Inspect a local data file (CSV, TSV, JSON, JSONL/NDJSON or log; gzip, bzip2, "
+                    "xz and zip files too) without reading it fully into memory. Returns the "
+                    "size, encoding, detected format, column names or JSON keys, and an "
+                    "estimated record count with its unit (a CSV record can span several "
+                    "lines). Runs entirely on this machine in constant memory, so it is safe "
+                    "for very large files. Use it before mine_dataset to understand a file."
                 ),
                 input_schema=_profile_schema(),
                 annotations={
@@ -324,16 +430,71 @@ class MiningTools:
                 description=(
                     "Extract data from a large local file into a CSV or JSONL result file, "
                     "processing it in memory-bounded chunks with crash-safe checkpoints. By "
-                    "default it extracts e-mail addresses into a column named 'email'. If a "
-                    "run is interrupted, calling again with the same path and output_path "
-                    "resumes where it stopped and never duplicates results. Progress is "
-                    "reported per chunk. All work is local; nothing is sent over the network."
+                    "default it extracts e-mail addresses into a column named 'email'; use "
+                    "unique and lowercase for a clean address list. Compressed (gzip, bzip2, "
+                    "xz, zip) and UTF-16 files are converted on the fly. If a run is "
+                    "interrupted, calling again with the same arguments resumes where it "
+                    "stopped and never duplicates results; changing any setting starts a new "
+                    "job. For very large files set wait=false and poll mining_status. Check "
+                    "the result with preview_result. All work is local; nothing is sent over "
+                    "the network."
                 ),
                 input_schema=_mine_schema(allow_custom_patterns),
                 annotations={
                     "title": "Mine a data file",
                     "readOnlyHint": False,
                     "destructiveHint": True,  # overwrite=true can replace an existing result file
+                    "idempotentHint": True,
+                    "openWorldHint": False,
+                },
+            ),
+            ToolDefinition(
+                name=TOOL_STATUS,
+                title="Check background mining jobs",
+                description=(
+                    "Progress and result of a mining job started with mine_dataset wait=false, "
+                    "or of every job started since the server began when job_id is omitted. "
+                    "A finished job carries the same summary mine_dataset returns."
+                ),
+                input_schema=_status_schema(),
+                annotations={
+                    "title": "Check background mining jobs",
+                    "readOnlyHint": True,
+                    "destructiveHint": False,
+                    "idempotentHint": True,
+                    "openWorldHint": False,
+                },
+            ),
+            ToolDefinition(
+                name=TOOL_CANCEL,
+                title="Cancel a background mining job",
+                description=(
+                    "Ask a background mining job to stop after the chunk it is working on. "
+                    "Nothing is lost: calling mine_dataset again with the same arguments "
+                    "resumes from the last checkpoint."
+                ),
+                input_schema=_cancel_schema(),
+                annotations={
+                    "title": "Cancel a background mining job",
+                    "readOnlyHint": False,
+                    "destructiveHint": False,
+                    "idempotentHint": True,
+                    "openWorldHint": False,
+                },
+            ),
+            ToolDefinition(
+                name=TOOL_PREVIEW,
+                title="Preview a result file",
+                description=(
+                    "Return the first records of a result file written by mine_dataset: the "
+                    "columns and rows of a CSV, or the objects of a JSON Lines file. Reads at "
+                    "most 256 KiB, so it is safe for any size."
+                ),
+                input_schema=_preview_schema(),
+                annotations={
+                    "title": "Preview a result file",
+                    "readOnlyHint": True,
+                    "destructiveHint": False,
                     "idempotentHint": True,
                     "openWorldHint": False,
                 },
@@ -359,6 +520,12 @@ class MiningTools:
             self._check_arguments(definition, arguments)
             if name == TOOL_PROFILE:
                 return self._run_profile(arguments)
+            if name == TOOL_STATUS:
+                return self._run_status(arguments)
+            if name == TOOL_CANCEL:
+                return self._run_cancel(arguments)
+            if name == TOOL_PREVIEW:
+                return self._run_preview(arguments)
             return self._run_mine(arguments, progress)
         except ToolInputError as exc:
             return ToolOutcome(error=str(exc))
@@ -366,7 +533,7 @@ class MiningTools:
             return ToolOutcome(error=f"{type(exc).__name__}: {exc}")
         except OSError as exc:
             return ToolOutcome(error=f"file system error: {describe_failure(exc)}")
-        except Exception as exc:  # noqa: BLE001 - a tool bug must not take the server down
+        except Exception as exc:
             self._logger.exception("tool %s failed unexpectedly", name)
             return ToolOutcome(error=f"internal error ({type(exc).__name__}); see the server log")
 
@@ -383,6 +550,29 @@ class MiningTools:
         source = self._existing_file(arguments["path"], "path")
         return ToolOutcome(data=self._profile(source))
 
+    def _run_preview(self, arguments: Mapping[str, Any]) -> ToolOutcome:
+        path = self._existing_file(arguments["path"], "path")
+        if path.suffix.lower() not in _RESULT_SUFFIXES:
+            raise ToolInputError("'path' must be a .csv, .jsonl or .ndjson result file")
+        rows = arguments.get("rows", DEFAULT_PREVIEW_ROWS)
+        return ToolOutcome(data=preview_result(path, rows))
+
+    def _run_status(self, arguments: Mapping[str, Any]) -> ToolOutcome:
+        job_id = arguments.get("job_id")
+        found = self._jobs.status(job_id)
+        if found is None:
+            raise ToolInputError(f"unknown job '{job_id}'")
+        if job_id is None:
+            return ToolOutcome(data={"jobs": found})
+        return ToolOutcome(data=found[0])
+
+    def _run_cancel(self, arguments: Mapping[str, Any]) -> ToolOutcome:
+        job_id = arguments["job_id"]
+        found = self._jobs.cancel(job_id)
+        if found is None:
+            raise ToolInputError(f"unknown job '{job_id}'")
+        return ToolOutcome(data=found)
+
     def _run_mine(self, arguments: Mapping[str, Any], progress: ProgressFn | None) -> ToolOutcome:
         source = self._existing_file(arguments["path"], "path")
         output = self._policy.resolve(arguments["output_path"], "output_path")
@@ -397,12 +587,42 @@ class MiningTools:
         if pattern is not None:
             try:
                 vet_pattern(pattern)
+                RegexExtractor(pattern, fields)  # compiles it and rejects repeated capture groups
             except InvalidConfigurationException as exc:
                 raise ToolInputError(str(exc)) from exc
         try:
             ensure_private_directory(output.parent)  # already confined to an allowed directory
         except OSError as exc:
             raise ToolInputError("the output directory cannot be created") from exc
+
+        overwrite = bool(arguments.get("overwrite", False))
+        csv_formula_guard = bool(arguments.get("csv_formula_guard", False))
+        lowercase = bool(arguments.get("lowercase", False))
+        unique = bool(arguments.get("unique", False))
+        output_display = self._policy.display(output)
+
+        def run(on_progress: Callable[[MiningProgress], None]) -> dict[str, Any]:
+            summary = self._mine(
+                source,
+                output,
+                workspace=self._policy.workspace,
+                pattern=pattern,
+                fields=fields,
+                overwrite=overwrite,
+                csv_formula_guard=csv_formula_guard,
+                lowercase=lowercase,
+                unique=unique,
+                on_progress=on_progress,
+            )
+            return summary_data(summary, output_display)
+
+        if not arguments.get("wait", True):
+            key = repr((source, output, pattern, fields, csv_formula_guard, lowercase, unique))
+            label = f"{self._policy.display(source)} -> {output_display}"
+            try:
+                return ToolOutcome(data=self._jobs.start(label, key, run))
+            except (JobAlreadyRunningError, TooManyJobsError) as exc:
+                raise ToolInputError(str(exc)) from exc
 
         def on_progress(update: MiningProgress) -> None:
             if progress is not None:
@@ -413,28 +633,16 @@ class MiningTools:
                     f"{update.records_written} records this run",
                 )
 
-        summary = self._mine(
-            source,
-            output,
-            workspace=self._policy.workspace,
-            pattern=pattern,
-            fields=fields,
-            overwrite=bool(arguments.get("overwrite", False)),
-            csv_formula_guard=bool(arguments.get("csv_formula_guard", False)),
-            on_progress=on_progress,
-        )
-        summary_data = summary.to_dict()
-        summary_data["output_path"] = self._policy.display(output)
-        summary_data["succeeded"] = summary.succeeded
-        if not summary.succeeded:
-            reason = f" First failure: {summary.first_error}." if summary.first_error else ""
+        data = run(on_progress)
+        if not data["succeeded"]:
+            reason = f" First failure: {data['first_error']}." if data["first_error"] else ""
             return ToolOutcome(
                 error=(
-                    f"{summary.chunks_failed} chunk(s) failed; the result file is incomplete.{reason} "
-                    "Calling again retries them. Details: " + str(summary_data)
+                    f"{data['chunks_failed']} chunk(s) failed; the result file is incomplete.{reason} "
+                    "Calling again retries them. Details: " + str(data)
                 )
             )
-        return ToolOutcome(data=summary_data)
+        return ToolOutcome(data=data)
 
     def _existing_file(self, raw: object, label: str) -> Path:
         path = self._policy.resolve(raw, label)

@@ -87,3 +87,7 @@ class JobLockedException(DataMiningException):
 
 class InvalidConfigurationException(DataMiningException, ValueError):
     """A configuration value is missing, malformed or out of range."""
+
+
+class MiningCancelledException(DataMiningException):
+    """The caller asked for the run to stop; the job resumes from its last checkpoint."""

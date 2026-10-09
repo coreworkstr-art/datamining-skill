@@ -1,0 +1,62 @@
+"""A bounded look at the start of a result file, for people and assistants checking a run."""
+
+from __future__ import annotations
+
+import csv
+import json
+from pathlib import Path
+from typing import Any
+
+DEFAULT_PREVIEW_ROWS = 20
+MAX_PREVIEW_ROWS = 200
+_PREVIEW_BYTES = 256 * 1024
+
+
+def preview_result(path: Path, rows: int = DEFAULT_PREVIEW_ROWS) -> dict[str, Any]:
+    """The first ``rows`` records of a ``.csv``, ``.jsonl`` or ``.ndjson`` result file.
+
+    Reads at most 256 KiB, so any file size is safe. CSV rows come back as lists below
+    ``columns``, JSON Lines records as objects. ``has_more`` says whether the file holds
+    more than was returned.
+    """
+    rows = max(1, min(rows, MAX_PREVIEW_ROWS))
+    size = path.stat().st_size
+    with path.open("rb") as handle:
+        head = handle.read(_PREVIEW_BYTES)
+    lines = head.decode("utf-8", errors="replace").split("\n")
+    if size > len(head):
+        lines.pop()  # the last line may be cut short
+    elif lines and lines[-1] == "":
+        lines.pop()
+    lines = [line.rstrip("\r") for line in lines]
+    complete = size <= len(head)
+
+    if path.suffix.lower() == ".csv":
+        table = list(csv.reader(line + "\n" for line in lines))  # a line break can be part of a value
+        columns = table[0] if table else []
+        records: list[Any] = table[1 : 1 + rows]
+        has_more = len(table) - 1 > rows or not complete
+        return {
+            "file": path.name,
+            "format": "csv",
+            "size_bytes": size,
+            "columns": columns,
+            "rows": records,
+            "rows_returned": len(records),
+            "has_more": has_more,
+        }
+
+    shown: list[Any] = []
+    for line in lines[:rows]:
+        try:
+            shown.append(json.loads(line))
+        except ValueError:
+            shown.append(line)
+    return {
+        "file": path.name,
+        "format": "jsonl",
+        "size_bytes": size,
+        "rows": shown,
+        "rows_returned": len(shown),
+        "has_more": len(lines) > rows or not complete,
+    }

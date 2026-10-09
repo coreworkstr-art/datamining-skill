@@ -39,7 +39,7 @@ from datamining_skill.infrastructure.permissions import (
     restrict_to_owner,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 _UNLIMITED_RETRIES = 2**62
 
 SCHEMA_DDL = """
@@ -62,6 +62,19 @@ CREATE TABLE IF NOT EXISTS chunk_commits (
     chunk_id   INTEGER PRIMARY KEY,
     output_end INTEGER NOT NULL CHECK (output_end >= 0)
 );
+
+-- 16-byte hashes of the records written so far, for unique mining (schema v3). Hashes
+-- only, never content; a chunk's keys are dropped if its attempt fails.
+CREATE TABLE IF NOT EXISTS seen_records (
+    key      BLOB    PRIMARY KEY,
+    chunk_id INTEGER NOT NULL
+) WITHOUT ROWID;
+
+-- Small facts about the job (schema v3), such as the fingerprint of its source.
+CREATE TABLE IF NOT EXISTS job_meta (
+    name  TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+) WITHOUT ROWID;
 """
 
 _SET_JOURNAL_MODE = "PRAGMA journal_mode=WAL"
@@ -69,7 +82,7 @@ _SET_SYNCHRONOUS = "PRAGMA synchronous=NORMAL"
 _GET_JOURNAL_MODE = "PRAGMA journal_mode"
 _GET_SYNCHRONOUS = "PRAGMA synchronous"
 _GET_USER_VERSION = "PRAGMA user_version"
-_SET_USER_VERSION = "PRAGMA user_version = 2"  # keep in sync with SCHEMA_VERSION
+_SET_USER_VERSION = "PRAGMA user_version = 3"  # keep in sync with SCHEMA_VERSION
 _BEGIN = "BEGIN IMMEDIATE"
 _COMMIT = "COMMIT"
 _ROLLBACK = "ROLLBACK"
@@ -112,6 +125,12 @@ _REQUEUE_FAILED = (
 _RECORD_COMMIT = "INSERT OR REPLACE INTO chunk_commits (chunk_id, output_end) VALUES (?, ?)"
 _COMMITTED_OUTPUT_END = "SELECT MAX(output_end) FROM chunk_commits"
 _PLAN_END = "SELECT MAX(end_byte) FROM chunks"
+_REGISTER_KEY = "INSERT OR IGNORE INTO seen_records (key, chunk_id) VALUES (?, ?)"
+_DISCARD_KEYS = "DELETE FROM seen_records WHERE chunk_id = ?"
+_RELEASE_KEYS = "DELETE FROM seen_records"
+_VACUUM = "VACUUM"
+_GET_META = "SELECT value FROM job_meta WHERE name = ?"
+_SET_META = "INSERT OR REPLACE INTO job_meta (name, value) VALUES (?, ?)"
 
 
 def _to_record(row: Sequence[Any]) -> ChunkRecord:
@@ -275,10 +294,11 @@ class StateManager:
         """Iterate chunks in id order, optionally only those with ``status``."""
         conn = self._connection()
         try:
-            if status is None:
-                cursor = conn.execute(_SELECT_ALL)
-            else:
-                cursor = conn.execute(_SELECT_BY_STATUS, (status.value,))
+            cursor = (
+                conn.execute(_SELECT_ALL)
+                if status is None
+                else conn.execute(_SELECT_BY_STATUS, (status.value,))
+            )
             try:
                 for row in cursor:
                     yield _to_record(row)
@@ -346,6 +366,44 @@ class StateManager:
         """End of the stored plan, i.e. the source size it was made for."""
         planned_end = self._fetch(_PLAN_END, ())[0][0]
         return None if planned_end is None else int(planned_end)
+
+    def register(self, chunk_id: int, keys: Sequence[bytes]) -> list[bool]:
+        """Remember ``keys`` for ``chunk_id`` in one transaction; ``True`` marks the new ones.
+
+        A key is new if no chunk, including this one earlier, has registered it.
+        """
+        fresh: list[bool] = []
+        with self._transaction() as conn:
+            for key in keys:
+                fresh.append(conn.execute(_REGISTER_KEY, (key, chunk_id)).rowcount == 1)
+        return fresh
+
+    def discard(self, chunk_id: int) -> None:
+        """Forget the keys ``chunk_id`` registered: its attempt failed or was interrupted."""
+        with self._transaction() as conn:
+            conn.execute(_DISCARD_KEYS, (chunk_id,))
+
+    def release_keys(self) -> None:
+        """Forget every remembered key and return the space to the file system.
+
+        For a finished job: nothing will register keys again, and for a large file they take
+        about 40 bytes each.
+        """
+        with self._transaction() as conn:
+            conn.execute(_RELEASE_KEYS)
+        try:
+            self._connection().execute(_VACUUM)
+        except sqlite3.Error as exc:
+            raise StateStoreException(f"state compaction failed ({type(exc).__name__})") from exc
+
+    def get_meta(self, name: str) -> str | None:
+        """A fact recorded with ``set_meta``, or ``None``."""
+        rows = self._fetch(_GET_META, (name,))
+        return str(rows[0][0]) if rows else None
+
+    def set_meta(self, name: str, value: str) -> None:
+        with self._transaction() as conn:
+            conn.execute(_SET_META, (name, value))
 
     def mark_failed(self, chunk_id: int) -> None:
         self._transition(chunk_id, ChunkStatus.IN_PROGRESS, ChunkStatus.FAILED, retry_increment=1)
@@ -424,7 +482,7 @@ class StateManager:
             )
         if version < SCHEMA_VERSION:
             # Every statement is IF NOT EXISTS, so the DDL both creates a fresh database (0)
-            # and migrates an old one (1 gains chunk_commits).
+            # and migrates an old one (1 gains chunk_commits, 2 gains seen_records and job_meta).
             conn.executescript(SCHEMA_DDL)
             conn.execute(_SET_USER_VERSION)
 

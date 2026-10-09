@@ -17,11 +17,10 @@ import subprocess
 import sys
 import tempfile
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import closing
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -122,7 +121,7 @@ def test_reinitializing_the_same_plan_preserves_progress(open_state: OpenState) 
     assert state.get(1).status is ChunkStatus.COMPLETED
 
 
-@pytest.mark.parametrize("other", [make_chunks(4), make_chunks(6), [ChunkMetadata(1, 0, 99)] + make_chunks(5)[1:]])
+@pytest.mark.parametrize("other", [make_chunks(4), make_chunks(6), [ChunkMetadata(1, 0, 99), *make_chunks(5)[1:]]])
 def test_a_different_plan_is_rejected_and_progress_is_kept(
     open_state: OpenState, other: list[ChunkMetadata]
 ) -> None:
@@ -416,7 +415,7 @@ def test_resume_does_not_touch_completed_chunks(open_state: OpenState) -> None:
 def test_wal_and_normal_synchronous_are_active(open_state: OpenState, state_dir: Path) -> None:
     state = open_state()
 
-    assert state.diagnostics() == {"journal_mode": "wal", "synchronous": 1, "schema_version": 2}
+    assert state.diagnostics() == {"journal_mode": "wal", "synchronous": 1, "schema_version": 3}
     with closing(sqlite3.connect(state_dir / "state.sqlite3")) as raw:
         assert raw.execute("PRAGMA journal_mode").fetchone()[0] == "wal"  # persisted in the file
 
@@ -429,10 +428,14 @@ def test_schema_stores_metadata_columns_only(open_state: OpenState, state_dir: P
         tables = {r[0] for r in raw.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
         columns = [r[1] for r in raw.execute("PRAGMA table_info(chunks)")]
         commit_columns = [r[1] for r in raw.execute("PRAGMA table_info(chunk_commits)")]
+        seen_columns = [r[1] for r in raw.execute("PRAGMA table_info(seen_records)")]
+        meta_columns = [r[1] for r in raw.execute("PRAGMA table_info(job_meta)")]
 
-    assert tables == {"chunks", "chunk_commits"}
+    assert tables == {"chunks", "chunk_commits", "seen_records", "job_meta"}
     assert columns == ["chunk_id", "start_byte", "end_byte", "status", "retry_count", "updated_at"]
     assert commit_columns == ["chunk_id", "output_end"]  # offsets only, never content
+    assert seen_columns == ["key", "chunk_id"]  # a 16-byte hash per record, never the record
+    assert meta_columns == ["name", "value"]
 
 
 def test_version_1_database_is_migrated_in_place(state_dir: Path) -> None:
@@ -450,9 +453,52 @@ def test_version_1_database_is_migrated_in_place(state_dir: Path) -> None:
         )
 
     with StateManager(path, allowed_roots=[SCRATCH_ROOT]) as state:
-        assert state.diagnostics()["schema_version"] == 2
+        assert state.diagnostics()["schema_version"] == 3
         assert state.get(1).status is ChunkStatus.COMPLETED  # existing progress kept
         assert state.committed_output_end() is None
+
+
+def test_version_2_database_gains_the_unique_and_meta_tables(state_dir: Path) -> None:
+    path = state_dir / "v2.sqlite3"
+    with StateManager(path, allowed_roots=[SCRATCH_ROOT]) as fresh:
+        fresh.initialize(make_chunks(2))
+    with closing(sqlite3.connect(path)) as raw:
+        raw.executescript("DROP TABLE seen_records; DROP TABLE job_meta; PRAGMA user_version = 2;")
+
+    with StateManager(path, allowed_roots=[SCRATCH_ROOT]) as state:
+        assert state.diagnostics()["schema_version"] == 3
+        assert state.register(1, [b"k"]) == [True]
+        state.set_meta("source", "1:2")
+        assert state.get_meta("source") == "1:2"
+        assert state.is_initialized()  # the plan survived
+
+
+def test_register_reports_new_keys_and_remembers_them_across_chunks(open_state: OpenState) -> None:
+    state = open_state()
+
+    assert state.register(1, [b"a", b"b", b"a", b"c"]) == [True, True, False, True]
+    assert state.register(2, [b"b", b"d"]) == [False, True]  # b was written by chunk 1
+    assert state.register(2, [b"d"]) == [False]  # and chunk 2's own earlier key counts too
+
+
+def test_discard_forgets_only_the_given_chunks_keys(open_state: OpenState) -> None:
+    state = open_state()
+    state.register(1, [b"a"])
+    state.register(2, [b"b"])
+
+    state.discard(2)
+
+    assert state.register(3, [b"a", b"b"]) == [False, True]  # a is kept, b may be written again
+
+
+def test_job_meta_round_trips_and_replaces(open_state: OpenState) -> None:
+    state = open_state()
+
+    assert state.get_meta("source") is None
+    state.set_meta("source", "10:20")
+    state.set_meta("source", "11:21")
+
+    assert state.get_meta("source") == "11:21"
 
 
 
@@ -521,7 +567,7 @@ def test_naive_clock_is_refused_and_no_handle_leaks(state_dir: Path) -> None:
         StateManager(
             state_dir / "naive.sqlite3",
             allowed_roots=[SCRATCH_ROOT],
-            clock=lambda: datetime(2025, 1, 1),  # noqa: DTZ001 - deliberately naive
+            clock=lambda: datetime(2025, 1, 1),
         )
     (state_dir / "naive.sqlite3").unlink()  # fails on Windows if the connection leaked
 
@@ -530,11 +576,14 @@ def test_context_manager_closes_even_when_the_body_raises(state_dir: Path) -> No
     path = state_dir / "ctx.sqlite3"
     holder: list[StateManager] = []
 
-    with pytest.raises(RuntimeError):
+    def failing_body() -> None:
         with StateManager(path, allowed_roots=[SCRATCH_ROOT]) as state:
             holder.append(state)
             state.initialize(make_chunks(2))
             raise RuntimeError("worker blew up")
+
+    with pytest.raises(RuntimeError):
+        failing_body()
 
     manager = holder[0]
     assert manager.closed

@@ -45,7 +45,7 @@ from datamining_skill import (
     StateManager,
     create_orchestrator,
 )
-from datamining_skill.domain.models import EncodingInfo, TextLine
+from datamining_skill.domain.models import EncodingInfo, TextBlock, TextLine
 from datamining_skill.domain.ports import ChunkStateStore, StreamReader
 from datamining_skill.infrastructure import FileStreamReader
 
@@ -54,10 +54,7 @@ SCRATCH = PROJECT_ROOT / ".scratch"
 CRASH_CHUNK = 3
 CRASH_POINTS = ("mid-chunk", "mid-append", "after-append")
 
-_WORDS = (
-    "login timeout retry upstream gateway session refresh token queue flush cache miss "
-    "replica lag checkpoint rotate certificate renewal handshake backoff throttle audit"
-).split()
+_WORDS = ["login", "timeout", "retry", "upstream", "gateway", "session", "refresh", "token", "queue", "flush", "cache", "miss", "replica", "lag", "checkpoint", "rotate", "certificate", "renewal", "handshake", "backoff", "throttle", "audit"]
 _GIVEN = ("amara", "tomas", "li", "priya", "jonas", "farid", "elena", "kofi", "marta", "sven")
 _FAMILY = ("hollis", "okafor", "lindqvist", "nair", "brandt", "haddad", "ruiz", "tanaka", "weber", "osei")
 _DECOYS = ("@handle", "name@host", "svc@@nowhere.test", "a@b", "@@", "mail@.test")
@@ -136,6 +133,18 @@ class MidChunkCrash:
             if doomed and consumed >= (end - start) // 2:
                 self._crash()
             yield line
+
+    def range_blocks(
+        self, path: Path, encoding: EncodingInfo, start: int, end: int, *, check_alignment: bool = False
+    ) -> Generator[TextBlock, None, None]:
+        self._calls += 1  # a chunk is read either by lines or by blocks, never both
+        doomed = self._calls == self._crash_on
+        consumed = 0
+        for block in self._inner.range_blocks(path, encoding, start, end, check_alignment=check_alignment):
+            consumed += block.byte_length
+            if doomed and consumed >= (end - start) // 2:
+                self._crash()
+            yield block
 
 
 class CrashBeforeCompletion:

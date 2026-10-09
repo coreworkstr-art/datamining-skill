@@ -5,9 +5,12 @@ from __future__ import annotations
 import csv
 import io
 import json
+import re
 from collections.abc import Sequence
 
 _FORMULA_TRIGGERS = ("=", "+", "-", "@", "\t", "\r")
+# a value that needs no quoting in any Python version: not empty, no delimiter, quote or line break
+_NEEDS_THE_CSV_WRITER = re.compile(r'[,"\r\n]|^$')
 
 
 class CsvFormatter:
@@ -20,6 +23,7 @@ class CsvFormatter:
 
     def __init__(self, fields: Sequence[str], *, formula_guard: bool = False) -> None:
         self._fields = tuple(fields)
+        self._width = len(self._fields)
         self._guard = formula_guard
         self._buffer = io.StringIO()
         self._writer = csv.writer(self._buffer, lineterminator="\n")
@@ -28,11 +32,23 @@ class CsvFormatter:
         return self._encode(self._fields)
 
     def format(self, record: Sequence[str]) -> bytes:
-        if len(record) != len(self._fields):
-            raise ValueError(f"record has {len(record)} values, expected {len(self._fields)}")
+        if len(record) != self._width:
+            raise ValueError(f"record has {len(record)} values, expected {self._width}")
         if self._guard:
             record = [f"'{cell}" if cell.startswith(_FORMULA_TRIGGERS) else cell for cell in record]
-        return self._encode(record)
+        search = _NEEDS_THE_CSV_WRITER.search
+        for cell in record:
+            if search(cell):
+                return self._encode(record)
+        return (",".join(record) + "\n").encode("utf-8")  # the same bytes, without the csv module
+
+    def format_clean(self, record: Sequence[str]) -> bytes:
+        """Like ``format`` for values known to hold no comma, quote or line break (never empty)."""
+        if len(record) != self._width:
+            raise ValueError(f"record has {len(record)} values, expected {self._width}")
+        if self._guard:
+            record = [f"'{cell}" if cell.startswith(_FORMULA_TRIGGERS) else cell for cell in record]
+        return (",".join(record) + "\n").encode("utf-8")
 
     def _encode(self, row: Sequence[str]) -> bytes:
         self._writer.writerow(row)

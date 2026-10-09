@@ -11,6 +11,7 @@ from typing import cast
 import pytest
 
 from datamining_skill import InvalidConfigurationException, MiningProgress, run_mining
+from datamining_skill.application.options import MiningOptions
 from datamining_skill.bootstrap import run_layout
 from tests.support import load_simulation
 from tests.test_orchestration import SCALED, Crash
@@ -100,7 +101,7 @@ def test_overwrite_discards_progress_and_state(
 ) -> None:
     source, expected = dataset
     mine(source, state_dir / "out.csv", state_dir)
-    layout = run_layout(state_dir, source, state_dir / "out.csv")
+    layout = run_layout(state_dir, source, state_dir / "out.csv", MiningOptions().fingerprint())
     assert layout.state_path.exists()
 
     fresh = mine(source, state_dir / "out.csv", state_dir, overwrite=True)

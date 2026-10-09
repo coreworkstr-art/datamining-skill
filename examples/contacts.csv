@@ -1,0 +1,12 @@
+id,name,department,email,notes
+1,Ada Hollis,Finance,ada.hollis@internal.corp.test,"Also reachable at A.HOLLIS@internal.corp.test"
+2,Gül Okafor,Sales,gul.okafor@hq.corp.test,"Prefers phone. Backup: sales-desk@hq.corp.test"
+3,Tomas Lindqvist,Support,tomas.lindqvist@internal.corp.test,
+4,Müşteri Hizmetleri,Support,müşteri@firma.com.tr.test,"Forwarded to support@internal.corp.test"
+5,Priya Nair,Engineering,priya.nair@internal.corp.test,"CC: ada.hollis@internal.corp.test"
+6,Jonas Brandt,Engineering,jonas.brandt@eu.corp.test,"Invoice questions: billing@internal.corp.test"
+7,Farid Haddad,Legal,farid.haddad@internal.corp.test,"Out of office until 2026-01-12"
+8,Elena Ruiz,Finance,elena.ruiz@internal.corp.test,"Alias: ELENA.RUIZ@INTERNAL.CORP.TEST"
+9,Kofi Osei,Sales,kofi.osei@hq.corp.test,"Contact: sales-desk@hq.corp.test"
+10,Marta Weber,Operations,marta.weber@eu.corp.test,"Notes spread
+over two lines. Escalate to ops-lead@eu.corp.test"

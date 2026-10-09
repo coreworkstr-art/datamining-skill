@@ -26,7 +26,6 @@ from datamining_skill.application.config import KIB, MIB
 from tests.conftest import WriteFile
 
 
-
 def test_csv_metadata_is_extracted_correctly(profiler: DataProfiler, write_file: WriteFile) -> None:
     rows = "\n".join(f"{i},acct{i},{i * 1.5:.2f}" for i in range(1, 501))
     content = f"id,name,amount\n{rows}\n"

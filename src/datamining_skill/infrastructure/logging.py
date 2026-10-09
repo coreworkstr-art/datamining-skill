@@ -54,13 +54,24 @@ def configure_json_logging(
 
     For applications and the CLI; the library itself never calls it.
     """
-    logger = logging.getLogger(_PACKAGE_LOGGER_NAME)
-    for existing in list(logger.handlers):
-        if isinstance(existing, _JsonStreamHandler):
-            logger.removeHandler(existing)
+    logger = disable_json_logging()
     handler = _JsonStreamHandler(stream if stream is not None else sys.stderr)
     handler.setFormatter(JsonLogFormatter())
     logger.addHandler(handler)
     logger.setLevel(level)
     logger.propagate = False
+    return logger
+
+
+def disable_json_logging() -> logging.Logger:
+    """Remove the JSON handler installed by ``configure_json_logging``, if any.
+
+    A process that calls the command-line entry point repeatedly would otherwise keep logging
+    to the stream of an earlier call, which may be closed by now.
+    """
+    logger = logging.getLogger(_PACKAGE_LOGGER_NAME)
+    for existing in list(logger.handlers):
+        if isinstance(existing, _JsonStreamHandler):
+            logger.removeHandler(existing)
+    logger.propagate = True
     return logger

@@ -28,7 +28,7 @@ from datamining_skill import (
 )
 from datamining_skill.application.orchestrator import MiningProgress, MiningSummary
 from datamining_skill.infrastructure.mcp_server import McpServer, serve_stdio
-from tests.conftest import SCRATCH_ROOT, WriteFile
+from tests.conftest import WriteFile
 from tests.support import load_simulation
 from tests.test_orchestration import SCALED
 
@@ -56,6 +56,8 @@ def scaled_mine(
     fields: Sequence[str] | None,
     overwrite: bool,
     csv_formula_guard: bool,
+    lowercase: bool,
+    unique: bool,
     on_progress: Callable[[MiningProgress], None] | None,
 ) -> MiningSummary:
     """The real mining runner with small simulated RAM so an 8 MiB file yields ~34 chunks."""
@@ -67,6 +69,8 @@ def scaled_mine(
         fields=fields,
         overwrite=overwrite,
         csv_formula_guard=csv_formula_guard,
+        lowercase=lowercase,
+        unique=unique,
         on_progress=on_progress,
         chunking_config=SCALED,
         memory_provider=sim.FixedMemory(source.stat().st_size // 5),
@@ -189,23 +193,28 @@ def test_tool_requests_before_initialize_are_rejected(client: Client) -> None:
 
 
 
-def test_tools_list_declares_both_tools_with_valid_schemas(client: Client) -> None:
+def test_tools_list_declares_every_tool_with_valid_schemas(client: Client) -> None:
     (response,) = client.handshake_and(request(2, "tools/list"))
 
     result = response["result"]
     assert "resultType" not in result and "ttlMs" not in result  # modern-only fields
     tools = {tool["name"]: tool for tool in result["tools"]}
-    assert list(tools) == ["profile_dataset", "mine_dataset"]  # deterministic order
+    assert list(tools) == ["profile_dataset", "mine_dataset", "mining_status", "cancel_mining", "preview_result"]  # deterministic order
     for tool in tools.values():
         schema = tool["inputSchema"]
         assert schema["type"] == "object" and schema["additionalProperties"] is False
         assert tool["description"] and tool["title"]
-        assert set(schema["required"]) <= set(schema["properties"])
+        assert set(schema.get("required", [])) <= set(schema["properties"])
         assert tool["annotations"]["openWorldHint"] is False
     assert tools["profile_dataset"]["inputSchema"]["required"] == ["path"]
     assert tools["profile_dataset"]["annotations"]["readOnlyHint"] is True
     assert tools["mine_dataset"]["inputSchema"]["required"] == ["path", "output_path"]
     assert tools["mine_dataset"]["annotations"]["readOnlyHint"] is False
+    assert tools["mining_status"]["annotations"]["readOnlyHint"] is True
+    assert tools["mining_status"]["inputSchema"].get("required", []) == []
+    assert tools["cancel_mining"]["inputSchema"]["required"] == ["job_id"]
+    assert tools["preview_result"]["annotations"]["readOnlyHint"] is True
+    assert tools["preview_result"]["inputSchema"]["properties"]["rows"]["maximum"] == 200
 
 
 def test_custom_pattern_arguments_are_only_declared_when_enabled(
@@ -216,7 +225,15 @@ def test_custom_pattern_arguments_are_only_declared_when_enabled(
         mine = next(t for t in response["result"]["tools"] if t["name"] == "mine_dataset")
         return set(mine["inputSchema"]["properties"])
 
-    assert mine_properties(make_server()) == {"path", "output_path", "overwrite", "csv_formula_guard"}
+    assert mine_properties(make_server()) == {
+        "path",
+        "output_path",
+        "overwrite",
+        "csv_formula_guard",
+        "lowercase",
+        "unique",
+        "wait",
+    }
     assert {"pattern", "fields"} <= mine_properties(make_server(allow_custom_patterns=True))
 
 
@@ -229,7 +246,7 @@ def test_modern_requests_need_no_handshake_and_carry_result_type(client: Client)
     assert result["resultType"] == "complete"
     assert result["ttlMs"] > 0 and result["cacheScope"] in ("public", "private")
     assert result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"] == "datamining-skill"
-    assert [t["name"] for t in result["tools"]] == ["profile_dataset", "mine_dataset"]
+    assert [t["name"] for t in result["tools"]] == ["profile_dataset", "mine_dataset", "mining_status", "cancel_mining", "preview_result"]
 
 
 def test_server_discover_reports_versions_and_capabilities(client: Client) -> None:
@@ -732,7 +749,7 @@ def test_handler_bugs_become_internal_errors_without_details(
 ) -> None:
     server = make_server()
     client = Client(server)
-    monkeypatch.setattr(server._tools, "definitions", lambda: 1 / 0)  # noqa: SLF001
+    monkeypatch.setattr(server._tools, "definitions", lambda: 1 / 0)
 
     broken, healthy = client.handshake_and(request(2, "tools/list"), request(3, "ping"))
 
@@ -823,7 +840,7 @@ def test_cli_mcp_runs_a_full_session_over_real_pipes(state_dir: Path) -> None:
     assert all(m["jsonrpc"] == "2.0" for m in messages)
     by_id = {m["id"]: m for m in messages if "id" in m}
     assert by_id[1]["result"]["serverInfo"]["name"] == "datamining-skill"
-    assert len(by_id[2]["result"]["tools"]) == 2
+    assert len(by_id[2]["result"]["tools"]) == 5
     assert by_id[3]["result"]["structuredContent"]["records"]["count"] == 2000
     assert by_id[4]["result"]["structuredContent"]["records_written"] == 2000
     assert any(m.get("method") == "notifications/progress" for m in messages)

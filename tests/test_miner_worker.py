@@ -8,6 +8,7 @@ import json
 import time
 import tracemalloc
 from collections.abc import Callable
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -84,7 +85,7 @@ def test_consecutive_ranges_tile_the_file_without_overlap_or_gap(write_file: Wri
     cuts = [0, 18, 90, 216, 450]  # all on line boundaries (multiples of 9)
 
     seen: list[str] = []
-    for start, end in zip(cuts, cuts[1:], strict=False):
+    for start, end in pairwise(cuts):
         seen.extend(line.text for line in reader().range_lines(path, UTF8, start, end))
 
     assert seen == [f"line-{i:03d}" for i in range(50)]
@@ -97,17 +98,17 @@ def test_alignment_check_rejects_a_start_inside_a_line(write_file: WriteFile) ->
         "bbb",
         "ccc",
     ]
-    assert [x.text for x in reader().range_lines(path, UTF8, 0, 12, check_alignment=True)][0] == "aaa"
+    assert next(iter(reader().range_lines(path, UTF8, 0, 12, check_alignment=True))).text == "aaa"
     with pytest.raises(UnsupportedDataFormatException, match="record boundary"):
         list(reader().range_lines(path, UTF8, 5, 12, check_alignment=True))
 
 
-def test_oversized_lines_are_truncated_within_range(write_file: WriteFile) -> None:
+def test_a_line_over_the_cap_is_kept_whole_when_it_fits_one_window(write_file: WriteFile) -> None:
     path = write_file("a.txt", "x" * 100 + "\nnext\n")
 
     first, second = reader(max_line=8).range_lines(path, UTF8, 0, 106)
 
-    assert first.truncated and first.text == "x" * 8 and first.byte_length == 101
+    assert not first.truncated and first.text == "x" * 100 and first.byte_length == 101
     assert (second.text, second.byte_length, second.truncated) == ("next", 5, False)
 
 
@@ -118,7 +119,7 @@ def test_range_ending_in_oversized_line_stops_at_end(
 
     (only,) = reader(max_line=8).range_lines(path, UTF8, 0, 40)
 
-    assert only.truncated and only.byte_length == 40
+    assert only.text == "x" * 40 and only.byte_length == 40
 
 
 def test_crlf_terminators_are_removed(write_file: WriteFile) -> None:
@@ -317,7 +318,7 @@ def test_a_chunk_that_starts_mid_line_is_refused(state_dir: Path, write_file: Wr
         make_worker(scratch).process(SourceDescriptor(path, UTF8), ChunkMetadata(2, 7, path.stat().st_size))
 
 
-def test_oversized_lines_are_skipped_and_counted(
+def test_oversized_lines_are_searched_in_full_and_counted(
     state_dir: Path, write_file: WriteFile
 ) -> None:
     giant = "pad " * 100 + "sys.admin@internal.corp.test"  # the address sits beyond the line cap
@@ -328,8 +329,12 @@ def test_oversized_lines_are_skipped_and_counted(
         SourceDescriptor(path, UTF8), ChunkMetadata(1, 0, path.stat().st_size)
     )
 
-    assert result.oversized_lines == 1
-    assert scratch.tmp_path(1).read_text().split() == ["emp1@internal.corp.test", "emp2@internal.corp.test"]
+    assert result.oversized_lines == 1 and result.lines_read == 3
+    assert scratch.tmp_path(1).read_text().split() == [
+        "emp1@internal.corp.test",
+        "sys.admin@internal.corp.test",
+        "emp2@internal.corp.test",
+    ]
 
 
 def test_worker_memory_is_constant_regardless_of_chunk_size(

@@ -5,11 +5,14 @@
 1. **No network access.** The runtime package imports no networking modules and has
    no third-party dependencies. Data processing never leaves the process.
 2. **No uncontrolled data copies.** Input files are opened with mode `rb` only and are
-   never modified. The profiler and chunking engine write nothing. Mining writes
-   exactly three things, all deliberate and all local: the result file you name, per-chunk
-   scratch files (`chunk_{id}.tmp`, deleted as each chunk is merged) and the chunk-state
-   database (metadata only). Scratch files and the database are confined to `.scratch/`
-   or `data/`; the code never calls `tempfile` or uses the system temporary directory.
+   never modified. The chunking engine writes nothing. Mining writes only what is
+   deliberate and local: the result file you name; per-chunk scratch files
+   (`chunk_{id}.tmp`, deleted as each chunk is merged); the chunk-state database and its
+   lock file (metadata, plus, for a unique job, one 16-byte hash per distinct record, deleted
+   when the job finishes); and, for a compressed or UTF-16 source, a temporary UTF-8 copy
+   (deleted when the job finishes). `profile` of a compressed file keeps a 4 MiB decompressed
+   sample for the duration of the call. All of these are confined to `.scratch/` or `data/`;
+   the code never calls `tempfile` or uses the system temporary directory.
    Files are created `0600` and directories `0700` on POSIX; on Windows a protected
    owner-only ACL is applied (see below). Regression tests fail if the profiler touches
    `tempfile` or modifies the source, and if a scratch or state path escapes its allowed
@@ -27,9 +30,11 @@
      characters of a line, which bounds worst-case matching time.
    - No `eval`, `exec`, `pickle`, `marshal`, `yaml.load` or dynamic imports.
 5. **Denial-of-service resistance.** All buffers are capped (see
-   [architecture.md](architecture.md#memory-model)). Oversized lines are truncated,
-   the remainder skipped in constant space; NUL-bearing and compressed/archive
-   content is rejected before parsing. Undecodable bytes are replaced rather than
+   [architecture.md](architecture.md#memory-model)). Oversized lines are searched in bounded
+   windows (profiling truncates them and skips the remainder in constant space); NUL-bearing
+   content and archive formats that cannot be converted are rejected before parsing. A
+   compressed source is expanded as a stream, stopped at an expansion limit and when free disk
+   space runs low, and never leaves a partial copy. Undecodable bytes are replaced rather than
    raising.
 6. **Strict configuration.** TOML configuration is loaded from a local file only;
    unknown keys, wrong types and out-of-range values are rejected.
@@ -50,6 +55,9 @@ the person who started it.
 | Planted `.scratch` symlink or junction | `run_layout` refuses a `.scratch` that resolves outside the workspace; otherwise state and chunk files, which contain mined data, could be redirected anywhere. |
 | Overwriting arbitrary files through `output_path` | Output must end in `.csv`, `.jsonl` or `.ndjson` and be inside an allowed directory; an existing result is never replaced unless `overwrite` is true; the output may not be the source file. |
 | Denial of service through a model-written regular expression | `pattern`/`fields` are not even declared unless the operator starts the server with `--allow-custom-patterns`, which prints a warning to stderr at startup. Even then, patterns that repeat a repeating group without an upper bound (`(a+)+`, `(a{1,64})+`) are rejected. This filter is defence in depth, not a guarantee: `re` has no time limit and overlapping alternations such as `(a\|aa)+` are not detected. |
+| A decompression bomb (`bomb.csv.gz`) | A compressed source is expanded as a stream into a private file in `.scratch/`, never into memory. The expansion is capped (`--max-expanded-gib`, default 64 GiB) and stops when less than 1 GiB of disk is free; the partial copy is deleted. A zip archive must hold exactly one unencrypted file. |
+| Reading a result file through `preview_result` | Only `.csv`, `.jsonl` and `.ndjson` files inside the allowed directories, and at most 256 KiB are read, whatever the file's size. |
+| Exhausting the machine with background jobs | At most four run at once; an identical job cannot be started twice; they use the same bounded-memory pipeline and the same per-job lock as a foreground run. |
 | Oversized or malformed messages | Messages are read in bounded pieces (1 MiB limit) and rejected without losing synchronisation; JSON that is too deep is rejected as a parse error. |
 | Over-broad workspace | With no `--allow-dir` and no `DATAMINING_SKILL_ALLOWED_DIRS`, the server uses its working directory and refuses to start if that is the filesystem root. |
 | Corrupting the protocol channel | stdout carries only JSON-RPC messages; `print` is redirected to stderr while serving. |
@@ -64,6 +72,11 @@ Residual risks, stated plainly:
   directories could swap a file for a symlink between the check and the open.
 - `--allow-custom-patterns` re-introduces the regular-expression denial-of-service risk.
 - Treat the allowed directories as readable and writable by whatever drives the client.
+- A unique job stores a hash of every distinct record while it runs. For low-entropy values such as
+  e-mail addresses a hash can be reversed by guessing, so treat the state database as sensitive as
+  the result file (it is owner-only and removed when the job finishes).
+- A converted copy of a compressed or UTF-16 source holds the whole text while a job is unfinished.
+  If a run is abandoned, `datamining-skill clean --all` removes it.
 
 ## Security controls and how they are verified
 
@@ -139,6 +152,8 @@ override could rewrite the user's terminal, so messages escape every non-printab
   logging or route stderr accordingly.
 - Test data and the dummy-data generator write inside the project directory
   (`.scratch/`, `data/`), both git-ignored. Delete generated datasets when finished.
+- Finished jobs leave a small state database under `<workspace>/.scratch/`. Remove them with
+  `datamining-skill clean`; it never touches a result file or a job that is running.
 - The profiler reports **structure only** (column names, JSON keys, field types).
   Column names can themselves be sensitive; treat output accordingly.
 - The **mining result file contains the extracted data itself** (for example e-mail

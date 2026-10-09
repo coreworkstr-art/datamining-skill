@@ -205,6 +205,16 @@ CREATE TABLE chunk_commits (                     -- schema v2: the output commit
     chunk_id   INTEGER PRIMARY KEY,
     output_end INTEGER NOT NULL CHECK (output_end >= 0)
 );
+
+CREATE TABLE seen_records (                      -- schema v3: hashes behind unique mining
+    key      BLOB    PRIMARY KEY,
+    chunk_id INTEGER NOT NULL
+) WITHOUT ROWID;
+
+CREATE TABLE job_meta (                          -- schema v3: small facts about the job
+    name  TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+) WITHOUT ROWID;
 ```
 
 `chunk_commits` records the length of the result file after each committed chunk. It is
@@ -212,10 +222,15 @@ written in the same transaction as the `COMPLETED` status (see
 [Mining pipeline](#mining-pipeline-worker-aggregator-orchestrator)) and holds byte
 offsets only.
 
-`PRAGMA user_version` holds the schema version (currently 2); a version-1 database is
-migrated in place on open (every DDL statement is `IF NOT EXISTS`, so existing progress
-is kept) and a newer, unknown version is refused rather than guessed at. The definition
-lives in `SCHEMA_DDL` in the module.
+`seen_records` holds one 16-byte BLAKE2 hash per distinct record written by a unique job (see
+[Unique mining](#unique-mining)): hashes only, never content. `job_meta` records the fingerprint
+of the source (size and modification time), the size of a converted copy and the conversion that
+made it.
+
+`PRAGMA user_version` holds the schema version (currently 3); an older database is migrated
+in place on open (every DDL statement is `IF NOT EXISTS`, so existing progress is kept) and a
+newer, unknown version is refused rather than guessed at. The definition lives in `SCHEMA_DDL`
+in the module.
 
 ### Status lifecycle
 
@@ -351,21 +366,75 @@ Profiler ─▶ ChunkingEngine ─▶ StateManager.initialize          (first ru
 
 | Component | Does | Does not |
 | --- | --- | --- |
-| `MinerWorker` | Seeks to `start_byte`, reads line by line until exactly `end_byte`, passes each line to the strategy, writes the formatted records to `chunk_{id}.tmp`. | Interpret data, touch the output file, or know about state. |
-| `ExtractionStrategy` | Pure function: one line in, zero or more records out (`RegexExtractor` is the reference implementation). | Perform I/O or keep per-file state. |
+| `MinerWorker` | Seeks to `start_byte`, reads until exactly `end_byte` (line by line, or in blocks of lines for a strategy that allows it), passes the text to the strategy, drops repeats for unique jobs, writes the formatted records to `chunk_{id}.tmp`. | Interpret data, touch the output file, or know about state. |
+| `ExtractionStrategy` | Pure function: text in, zero or more records out (`RegexExtractor` for any pattern, `EmailExtractor` for the built-in extraction). | Perform I/O or keep per-file state. |
 | `RecordFormatter` | Serialises a record to CSV or JSONL bytes. | Decide what is extracted. |
 | `ResultAggregator` | Moves a finished scratch file onto the end of the output, idempotently. | Mark chunks complete. |
 | `MiningOrchestrator` | The single-threaded loop: claim, mine, merge, commit; failure isolation; resume checks. | Read or write data itself. |
 
-The worker reads through `StreamReader.range_lines`, which caps every read at the bytes
-left in the range, so it stops *exactly* at `end_byte` even if a boundary were
-misaligned. A chunk that does not start right after a newline is refused, and chunk 1
-skips ahead to `FileProfile.data_offset` so a BOM and header row are never mined.
+The worker reads through `StreamReader.range_lines` or `StreamReader.range_blocks`, which cap
+every read at the bytes left in the range, so it stops *exactly* at `end_byte` even if a
+boundary were misaligned. A chunk that does not start right after a newline is refused, and
+chunk 1 skips ahead to `FileProfile.data_offset` so a BOM and header row are never mined.
 
-**Memory is O(1).** Lines come from a generator; each record is formatted and written
-immediately; nothing accumulates. A test processes a 16 MiB chunk with under 1 MiB of
-traced allocation. Lines longer than the reader's cap are skipped and counted, never
-passed on truncated, since a cut line could yield a wrong match.
+**Memory is O(1).** Lines or blocks come from a generator; records are formatted as they are
+produced and written in batches of a few thousand; nothing grows with the chunk. A test
+processes a 16 MiB chunk with under 1 MiB of traced allocation.
+
+### Reading: lines, blocks and windows
+
+A strategy that declares itself `line_independent` (no match can contain a line break; the
+built-in e-mail extraction does) is given **blocks**: about one read buffer (64 KiB), cut after
+its last line feed, decoded as one string. Searching a block avoids the per-line cost of reading,
+decoding and calling the strategy, which dominates for short lines. Any other strategy, such as a
+caller's pattern, is given one line at a time, because a pattern may match across a line break
+(`\s` does). Both paths are held to the same results by differential tests: random files, line
+endings, chunk ranges and line lengths must give byte-identical output and counts either way.
+
+A line longer than `max_line_bytes` (1 MiB by default) is neither skipped nor cut. It is
+delivered as **windows**: pieces of at most about the cap, each answerable for a span of the line
+(`emit_from`, `emit_until`) with `context` bytes before it, so that a look-behind sees what
+precedes, and `overlap` bytes after it, so that a match which begins inside the span and runs
+past it is still found whole (provided it is shorter than the overlap, 4 KiB). The ends of a
+span snap to just after a comma, space, tab or semicolon when one is near, which keeps JSON
+escapes in one piece, and to a character boundary in UTF-8. The strategy reports only the
+matches that *begin* inside the span, so every match is reported once. A strategy whose
+`extract` takes only the line sees each window's own span instead. Random-data tests check that
+windows find exactly what the whole line holds and that every byte is accounted for once.
+
+### The e-mail extractor
+
+`EmailExtractor` finds the same addresses as `EMAIL_PATTERN`, a bounded-quantifier pattern that
+accepts letters and digits of any script and punycode domains. A test compares it with the ASCII
+pattern it falls back to on pure-ASCII text on random strings. It first locates each `@` with a
+plain string search and runs the pattern only in a window around it (65 characters to the left,
+700 to the right, matching the pattern's bounds), skipping text that an earlier match used. Text
+with fewer than 200 characters per `@` is searched in one pass instead, which is quicker there. A
+differential test against one pass over random text, including windows and the long-run edge cases,
+keeps the two paths identical. Sparse text such as a log is therefore read at close to disk speed.
+
+### Unique mining
+
+With `--unique` the worker hashes each formatted record (BLAKE2b, 16 bytes) and asks the state
+database whether any record, in this chunk or an earlier one, has the same hash
+(`INSERT OR IGNORE` into `seen_records`, in batches inside one transaction); only new records are
+written. Memory stays constant because the set lives in SQLite. The hashes of a chunk are tagged
+with its id: when an attempt fails, or is found interrupted on resume (`retry_count > 0`), they
+are discarded before the chunk is mined again, so a crash can neither hide a record nor repeat
+one. When a unique job finishes, its keys are deleted and the database compacted. "First
+occurrence" means first in processing order, which is file order unless a failed chunk was retried.
+
+### Source conversion
+
+Mining finds records by byte range, which needs one byte per character and a plain file.
+`infrastructure/source_prep.py` therefore converts a gzip, bzip2, xz or single-file zip source,
+and UTF-16/32 text, to a UTF-8 copy in the job's private scratch folder (`source.utf8`), as a stream
+in constant memory; a compressed UTF-16 file goes through both steps. The conversion stops at an
+expansion limit (default 64 GiB) and when free disk space falls below 1 GiB, and never leaves a
+partial copy. The copy is reused if the job is resumed and the source's fingerprint is unchanged,
+and deleted when the job finishes. A repeated call for a finished job is answered from the state
+database (`already_complete`) without converting or profiling again. `profile` judges a compressed
+file by its first 4 MiB decompressed.
 
 ### File-level idempotency: TMP -> APPEND with a commit ledger
 
@@ -515,16 +584,22 @@ and adds no data-processing logic of its own.
                        MiningTools  (declarations, argument validation, WorkspacePolicy)
                             │
                             ▼
-              profile_dataset ─▶ create_profiler().profile_as_dict
+              profile_dataset ─▶ profile_source(...)
               mine_dataset ────▶ run_mining(...)  ─▶ StateManager + MiningOrchestrator
+                  │ wait=false          (in the foreground, or on a MiningJobs thread)
+                  ▼
+              mining_status / cancel_mining ─▶ MiningJobs
+              preview_result ──▶ preview_result(...)  (reads at most 256 KiB)
 ```
 
 | Module | Responsibility |
 | --- | --- |
 | `infrastructure/mcp_server.py` | Standard-library JSON-RPC 2.0 over newline-delimited stdio; protocol lifecycle; error codes; progress notifications. |
-| `infrastructure/mcp_tools.py` | The `profile_dataset` and `mine_dataset` declarations (JSON Schema + behaviour annotations), argument validation, and `WorkspacePolicy` path confinement. Runners are injected, so it depends on neither the CLI nor the composition root. |
-| `bootstrap.py` | `run_mining` (state/scratch layout, resume, overwrite) and `create_mcp_server`; shared by the `mine` command and the MCP tool. |
-| `cli.py` | `profile`, `mine` and `mcp` commands; exit codes; allowed-directory resolution. |
+| `infrastructure/mcp_tools.py` | The five tool declarations (JSON Schema + behaviour annotations), argument validation, and `WorkspacePolicy` path confinement. Runners are injected, so it depends on neither the CLI nor the composition root. |
+| `infrastructure/mcp_jobs.py` | `MiningJobs`: background runs on daemon threads, their progress, results and cancellation. |
+| `infrastructure/result_preview.py` | The bounded look at the start of a result file. |
+| `bootstrap.py` | `run_mining` (state/scratch layout, resume, overwrite, conversion, finished-job answer), `profile_source` and `create_mcp_server`; shared by the CLI and the MCP tools. |
+| `cli.py` | `profile`, `mine`, `preview`, `clean` and `mcp` commands; exit codes; allowed-directory resolution; the progress line. |
 
 ### Protocol: one server, two eras
 
@@ -575,14 +650,29 @@ by design: killing the process mid-call leaves a consistent checkpoint, and call
 `mine_dataset` again resumes. There is no batch support (removed from MCP) and the server never
 sends requests of its own.
 
+### Background jobs
+
+A client that gives up on a tool call after a minute cannot wait for a run over a very large
+file, so `mine_dataset` with `wait=false` hands the same `run_mining` call to `MiningJobs`, which
+runs it on a daemon thread and returns a job id at once. The request loop stays free: `mining_status`
+reads the job's counters (updated by the orchestrator's `on_progress` callback, under a lock) and
+`cancel_mining` sets a flag that the callback turns into a `MiningCancelledException` after the
+chunk in progress, which the orchestrator treats like any interruption. At most four jobs run at
+once, an identical job cannot be started twice, and the last 20 finished jobs are kept. When the
+server exits the threads end with it, and the job resumes from its checkpoints on the next call.
+Job ids are not persistent. The cross-process lock still protects each job from a second process.
+
 ### Mining jobs from the outside
 
-`run_mining` derives a deterministic layout from the resolved source and output paths:
-`<workspace>/.scratch/mining-<hash>.sqlite3` and `<workspace>/.scratch/mining-<hash>/`. The same
-(source, output) pair therefore finds its previous progress, so repeating a call resumes it, while
-different jobs never collide. `overwrite` deletes only that job's own state and scratch files,
-then starts fresh. A source whose size changed since the plan was made is refused rather than
-mined inconsistently.
+`run_mining` derives a deterministic layout from the resolved source and output paths and a
+fingerprint of the job's settings (pattern, fields, `lowercase`, `unique`, `csv_formula_guard`,
+`json_escapes`): `<workspace>/.scratch/mining-<hash>.sqlite3`, `.lock` and `mining-<hash>/`. The
+same job therefore finds its previous progress, so repeating a call resumes it, while a job with
+other settings, or other paths, never collides: it is a new job, and an existing output file is
+then refused unless `overwrite` is set. `overwrite` deletes only that job's own state and scratch
+files, then starts fresh. A source whose size changed since the plan was made is refused rather
+than mined inconsistently. `datamining-skill clean` removes the files of finished jobs, taking each
+job's lock first so that a running job is never touched.
 
 ### Command-line exit codes
 
@@ -598,8 +688,15 @@ interpreter's exit-time flush cannot fail a second time.
 
 ### Continuous integration
 
-`.github/workflows/ci.yml` runs on every push and pull request: `mypy --strict` and the full
-test suite on a matrix of Linux, macOS and Windows with Python 3.11 to 3.14, then builds the
-sdist and wheel, installs the wheel in a clean virtual environment, asserts it brings in no
-third-party packages, and runs `scripts/mcp_smoke_test.py` against the installed command.
+`.github/workflows/ci.yml` runs on every push to `main` and every pull request: `ruff`, then
+`mypy --strict` and the full test suite on a matrix of Linux, macOS and Windows with Python 3.11
+to 3.14 (plus a resource-leak gate under `python -X dev` on 3.14), then builds the sdist and
+wheel, checks what they contain (`scripts/check_distributions.py`), installs the wheel in a clean
+virtual environment, asserts it brings in no third-party packages, and runs
+`scripts/mcp_smoke_test.py` against the installed command. Every action is pinned to a commit.
+`.github/workflows/release.yml` turns a `vX.Y.Z` tag into a GitHub release (notes from
+`CHANGELOG.md`) and, when the repository variable `PUBLISH_TO_PYPI` is `true`, a PyPI upload with
+trusted publishing. `codeql.yml` and Dependabot watch for vulnerabilities and stale actions.
+Tests in `tests/test_packaging.py` keep the plugin manifest, the skill, the documentation links, the
+README's option list and the workflows in step with the code.
 

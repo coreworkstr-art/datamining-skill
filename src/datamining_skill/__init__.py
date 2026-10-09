@@ -17,6 +17,7 @@ from datamining_skill.application.config import ChunkingConfig, OrchestratorConf
 from datamining_skill.application.data_profiler import DataProfiler
 from datamining_skill.application.extraction_strategy import ExtractionStrategy, RegexExtractor
 from datamining_skill.application.miner_worker import ChunkResult, MinerWorker, SourceDescriptor
+from datamining_skill.application.options import MiningOptions
 from datamining_skill.application.orchestrator import (
     MiningOrchestrator,
     MiningProgress,
@@ -29,6 +30,7 @@ from datamining_skill.bootstrap import (
     create_mcp_server,
     create_orchestrator,
     create_profiler,
+    profile_source,
     run_mining,
 )
 from datamining_skill.domain.exceptions import (
@@ -37,6 +39,7 @@ from datamining_skill.domain.exceptions import (
     InvalidConfigurationException,
     InvalidStateTransitionException,
     JobLockedException,
+    MiningCancelledException,
     OutputIntegrityException,
     ResourceExhaustionError,
     StateStoreException,
@@ -73,6 +76,8 @@ __all__ = [
     "JobLockedException",
     "JsonlFormatter",
     "MinerWorker",
+    "MiningCancelledException",
+    "MiningOptions",
     "MiningOrchestrator",
     "MiningProgress",
     "MiningSummary",
@@ -91,5 +96,6 @@ __all__ = [
     "create_mcp_server",
     "create_orchestrator",
     "create_profiler",
+    "profile_source",
     "run_mining",
 ]

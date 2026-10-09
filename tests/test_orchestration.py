@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any, BinaryIO, cast
 
@@ -23,6 +23,7 @@ from datamining_skill import (
     ChunkMetadata,
     ChunkResult,
     ChunkStatus,
+    ExtractionStrategy,
     InvalidConfigurationException,
     MiningOrchestrator,
     MiningProgress,
@@ -40,7 +41,7 @@ from datamining_skill.domain.ports import ChunkStateStore, StreamReader
 from datamining_skill.infrastructure import FileStreamReader, JsonLogFormatter
 from datamining_skill.infrastructure.output_sink import LocalOutputSink
 from datamining_skill.infrastructure.scratch import LocalScratchStore
-from tests.conftest import SCRATCH_ROOT, OpenState, WriteFile
+from tests.conftest import SCRATCH_ROOT, OpenState
 from tests.support import SIMULATION_SCRIPT, load_simulation
 
 sim = load_simulation()
@@ -96,9 +97,8 @@ def test_symlinked_scratch_file_is_refused(state_dir: Path) -> None:
     except (OSError, NotImplementedError):
         pytest.skip("symbolic links are not available to this user")
 
-    with pytest.raises(InvalidConfigurationException, match="symbolic link"):
-        with scratch.open_tmp(1):
-            pass
+    with pytest.raises(InvalidConfigurationException, match="symbolic link"), scratch.open_tmp(1):
+        pass
     assert victim.read_text() == "retained export"
 
 
@@ -558,13 +558,13 @@ def test_repeatedly_crashing_chunk_is_abandoned(
 class FailsOnCall:
     """Strategy wrapper that raises an ordinary exception on its Nth line."""
 
-    def __init__(self, inner: RegexExtractor, fail_on_line: int) -> None:
+    def __init__(self, inner: ExtractionStrategy, fail_on_line: int) -> None:
         self._inner = inner
         self._fail_on = fail_on_line
         self._calls = 0
         self.fields = inner.fields
 
-    def extract(self, line: str) -> Iterator[Any]:
+    def extract(self, line: str) -> Iterable[Any]:
         self._calls += 1
         if self._calls == self._fail_on:
             raise ValueError("strategy bug")
@@ -579,7 +579,7 @@ def test_ordinary_error_fails_only_that_chunk(
 
     summary = build(state, source, state_dir, strategy=FailsOnCall(RegexExtractor.emails(), 10_000)).run(source)
 
-    failed = [r for r in state.records(ChunkStatus.FAILED)]
+    failed = list(state.records(ChunkStatus.FAILED))
     assert len(failed) == 1 and summary.chunks_failed == 1
     lost = set(re.findall(EMAIL_PATTERN, source.read_bytes()[failed[0].start_byte : failed[0].end_byte].decode()))
     assert lost  # the failed chunk did contain addresses
@@ -709,11 +709,11 @@ def test_validation_script_passes_with_real_hard_exits() -> None:
 class RaisesOnCall(FailsOnCall):
     """Like ``FailsOnCall`` but with a caller-chosen exception."""
 
-    def __init__(self, inner: RegexExtractor, fail_on_line: int, error: Exception) -> None:
+    def __init__(self, inner: ExtractionStrategy, fail_on_line: int, error: Exception) -> None:
         super().__init__(inner, fail_on_line)
         self._error = error
 
-    def extract(self, line: str) -> Iterator[Any]:
+    def extract(self, line: str) -> Iterable[Any]:
         self._calls += 1
         if self._calls == self._fail_on:
             raise self._error
@@ -790,7 +790,7 @@ def test_a_utf16_source_is_refused_up_front_with_the_reason(
     source.write_bytes(b"\xff\xfe" + ("id,note\r\n" + rows).encode("utf-16-le"))
     state = open_state()
 
-    with pytest.raises(UnsupportedDataFormatException, match="utf-16.*convert it to UTF-8"):
+    with pytest.raises(UnsupportedDataFormatException, match=r"utf-16.*convert it to UTF-8"):
         build(state, source, state_dir).run(source)
 
     assert not state.is_initialized()  # nothing was planned or recorded

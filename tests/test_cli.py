@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -232,16 +234,41 @@ def test_a_config_that_is_not_utf8_is_a_clean_error(
     assert_clean_failure(capsys, code, mentions="not valid UTF-8")
 
 
-@pytest.mark.skipif(os.name != "nt", reason="a 260-character limit exists on Windows only")
-def test_a_path_beyond_the_windows_limit_is_a_clean_error(
+def test_a_path_the_system_refuses_is_a_clean_error(
+    state_dir: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    make_contacts(state_dir / "in.csv")
+
+    def too_long(path: Path) -> None:
+        raise OSError(errno.ENAMETOOLONG, "File name too long", str(path))
+
+    monkeypatch.setattr("datamining_skill.bootstrap.ensure_private_directory", too_long)
+
+    code = run_cli("mine", str(state_dir / "in.csv"), str(state_dir / "out.csv"), "--workspace", str(state_dir))
+
+    assert_clean_failure(capsys, code, mentions="File name too long")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the 260-character limit exists on Windows only")
+def test_a_path_beyond_the_windows_limit_works_when_long_paths_are_enabled_and_fails_cleanly_otherwise(
     state_dir: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     make_contacts(state_dir / "in.csv")
-    too_deep = state_dir.joinpath(*["d" * 30] * 12)
+    too_deep = state_dir.joinpath(*["d" * 30] * 12)  # well beyond 260 characters
+    try:
+        too_deep.mkdir(parents=True)
+        long_paths_enabled = True
+    except OSError:
+        long_paths_enabled = False
+    finally:
+        shutil.rmtree(state_dir / ("d" * 30), ignore_errors=True)
 
     code = run_cli("mine", str(state_dir / "in.csv"), str(state_dir / "out.csv"), "--workspace", str(too_deep))
 
-    assert_clean_failure(capsys, code)
+    if long_paths_enabled:
+        assert code == 0  # a system that allows long paths gets no artificial limit from us
+    else:
+        assert_clean_failure(capsys, code)
 
 
 def test_debug_adds_the_traceback_without_changing_the_exit_code(

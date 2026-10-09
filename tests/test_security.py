@@ -481,7 +481,7 @@ def test_runtime_has_no_network_process_or_dynamic_code_imports() -> None:
             [a.name for a in node.names] if isinstance(node, ast.Import)
             else [node.module or ""] if isinstance(node, ast.ImportFrom) and node.level == 0
             else []
-        )  # fmt: skip
+        )
         if name.split(".")[0] in banned
     ]
     assert found == []
@@ -738,7 +738,7 @@ def test_private_directory_creates_parents_refuses_files(state_dir: Path) -> Non
     blocker = state_dir / "blocker"
     blocker.write_text("not a directory")
 
-    with pytest.raises(OSError):
+    with pytest.raises(FileExistsError, match="not a directory"):
         ensure_private_directory(blocker)
 
 

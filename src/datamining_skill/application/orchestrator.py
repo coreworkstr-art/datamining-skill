@@ -22,7 +22,7 @@ from datamining_skill.domain.exceptions import (
     UnsupportedDataFormatException,
 )
 from datamining_skill.domain.models import ChunkMetadata, ChunkStatus
-from datamining_skill.domain.ports import ChunkStateStore, ScratchStore
+from datamining_skill.domain.ports import ChunkStateStore, ScratchStore, UniqueKeyStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,7 +38,13 @@ class MiningProgress:
 @dataclass(frozen=True, slots=True)
 class MiningSummary:
     """Outcome of one ``run``. ``records_written`` and ``chunks_processed`` cover this run only;
-    chunks an earlier run committed are in ``chunks_previously_completed``."""
+    chunks an earlier run committed are in ``chunks_previously_completed``.
+
+    ``already_complete`` means the job had finished earlier and nothing was left to do;
+    ``duplicates_skipped`` counts records dropped by unique mining and ``oversized_lines``
+    lines longer than the reader's size cap, which were searched in full window by window.
+    ``source_transform`` names a conversion applied first (``"gzip"``, ``"utf-16-le"``, ...).
+    """
 
     output_name: str
     resumed: bool
@@ -51,6 +57,10 @@ class MiningSummary:
     duration_seconds: float
     first_error: str | None = None
     """Why the first chunk failed, if any did; never contains data."""
+    already_complete: bool = False
+    duplicates_skipped: int = 0
+    oversized_lines: int = 0
+    source_transform: str | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -68,6 +78,10 @@ class MiningSummary:
             "records_written": self.records_written,
             "duration_ms": round(self.duration_seconds * 1000, 3),
             "first_error": self.first_error,
+            "already_complete": self.already_complete,
+            "duplicates_skipped": self.duplicates_skipped,
+            "oversized_lines": self.oversized_lines,
+            "source_transform": self.source_transform,
         }
 
 
@@ -93,6 +107,7 @@ class MiningOrchestrator:
         config: OrchestratorConfig,
         logger: logging.Logger,
         clock: Callable[[], float] = time.perf_counter,
+        unique_keys: UniqueKeyStore | None = None,
     ) -> None:
         self._profiler = profiler
         self._engine = chunking_engine
@@ -103,6 +118,7 @@ class MiningOrchestrator:
         self._config = config
         self._logger = logger
         self._clock = clock
+        self._unique_keys = unique_keys
 
     def run(
         self,
@@ -149,7 +165,9 @@ class MiningOrchestrator:
                 )
             self._state.initialize(self._engine.plan(source, profile))
 
-        descriptor = SourceDescriptor(source, profile.encoding, profile.data_offset)
+        descriptor = SourceDescriptor(
+            source, profile.encoding, profile.data_offset, profile.data_format
+        )
         # every non-COMPLETED chunk is redone from scratch, so existing scratch files are stale
         self._scratch.clear_stale()
         if resumed and self._config.retry_failed_on_start:
@@ -167,7 +185,7 @@ class MiningOrchestrator:
             chunks_completed=counts_before[ChunkStatus.COMPLETED],
         )
 
-        processed = records = handled = 0
+        processed = records = handled = duplicates = oversized = 0
         first_error: str | None = None
         total_chunks = sum(counts_before.values())
         already_done = counts_before[ChunkStatus.COMPLETED] + counts_before[ChunkStatus.FAILED]
@@ -194,6 +212,8 @@ class MiningOrchestrator:
                 report()
                 continue
 
+            if claimed.retry_count > 0 and self._unique_keys is not None:
+                self._unique_keys.discard(chunk_id)  # an earlier attempt may have registered keys
             chunk_started = self._clock()
             chunk = ChunkMetadata(chunk_id, claimed.start_byte, claimed.end_byte)
             try:
@@ -202,6 +222,8 @@ class MiningOrchestrator:
             except Exception as exc:  # noqa: BLE001 - isolate one chunk's failure
                 self._scratch.discard_tmp(chunk_id)
                 self._aggregator.rollback_uncommitted()
+                if self._unique_keys is not None:
+                    self._unique_keys.discard(chunk_id)  # its records were never written
                 self._state.mark_failed(chunk_id)
                 handled += 1
                 reason = describe_failure(exc)
@@ -221,6 +243,8 @@ class MiningOrchestrator:
             processed += 1
             handled += 1
             records += chunk_result.records_written
+            duplicates += chunk_result.duplicates_skipped
+            oversized += chunk_result.oversized_lines
             self._emit(
                 logging.INFO,
                 "chunk.completed",
@@ -228,6 +252,7 @@ class MiningOrchestrator:
                 lines=chunk_result.lines_read,
                 records=chunk_result.records_written,
                 oversized_lines=chunk_result.oversized_lines,
+                duplicates_skipped=chunk_result.duplicates_skipped,
                 duration_ms=round((self._clock() - chunk_started) * 1000, 3),
             )
             report()
@@ -244,6 +269,14 @@ class MiningOrchestrator:
             records_written=records,
             duration_seconds=self._clock() - run_started,
             first_error=first_error,
+            already_complete=(
+                resumed
+                and processed == 0
+                and handled == 0
+                and counts_after[ChunkStatus.FAILED] == 0
+            ),
+            duplicates_skipped=duplicates,
+            oversized_lines=oversized,
         )
         self._emit(logging.INFO, "mining.completed", **summary.to_dict())
         return summary

@@ -72,10 +72,13 @@ class ServerIdentity:
 
 
 INSTRUCTIONS = (
-    "Local-only data mining. Use profile_dataset to inspect a large CSV, JSONL or log file, "
-    "then mine_dataset to extract data from it into a CSV or JSONL file. Files must be inside "
-    "the directories this server was started with. Interrupted runs resume automatically when "
-    "mine_dataset is called again with the same arguments."
+    "Local-only data mining. Use profile_dataset to inspect a large CSV, JSON, JSONL or log "
+    "file (gzip, bzip2, xz and zip too), then mine_dataset to extract data from it into a CSV "
+    "or JSONL file: e-mail addresses by default, with unique and lowercase for a clean list. "
+    "Check the result with preview_result. For a very large file call mine_dataset with "
+    "wait=false and poll mining_status. Files must be inside the directories this server was "
+    "started with. Interrupted runs resume when mine_dataset is called again with the same "
+    "arguments."
 )
 
 
@@ -112,8 +115,7 @@ class McpServer:
             if line is _TOO_LARGE:
                 send(_error_response(None, INVALID_REQUEST, "Message too large"))
                 continue
-            assert isinstance(line, str)
-            if line.strip():
+            if isinstance(line, str) and line.strip():
                 self.handle_line(line, send)
 
     def handle_line(self, line: str, send: Send) -> None:
@@ -160,7 +162,7 @@ class McpServer:
             response = self._request(method, params, send)
         except JsonRpcError as exc:
             send(_error_response(request_id, exc.code, exc.message, exc.data))
-        except Exception:  # noqa: BLE001 - a handler bug must not kill the loop
+        except Exception:
             self._logger.exception("unhandled error in %s", method)
             send(_error_response(request_id, INTERNAL_ERROR, "Internal error"))
         else:
@@ -313,7 +315,8 @@ class McpServer:
 def _tool_result(outcome: ToolOutcome, *, structured: bool) -> dict[str, Any]:
     if outcome.error is not None:
         return {"content": [{"type": "text", "text": outcome.error}], "isError": True}
-    assert outcome.data is not None
+    if outcome.data is None:
+        raise ValueError("a successful tool outcome carries data")
     tool_result: dict[str, Any] = {
         "content": [{"type": "text", "text": json.dumps(outcome.data, indent=2)}],
         "isError": False,

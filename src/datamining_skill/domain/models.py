@@ -6,26 +6,57 @@ import enum
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, NamedTuple
 
 
 class DataFormat(enum.StrEnum):
     CSV = "csv"
     JSONL = "jsonl"
+    JSON = "json"
     LOG = "log"
 
 
-@dataclass(frozen=True, slots=True)
-class TextLine:
+class TextLine(NamedTuple):
     """A decoded line without its terminator.
 
     ``byte_length`` is the on-disk size, terminator included and counting any bytes dropped
     by truncation; ``truncated`` means the line exceeded the size cap and ``text`` is a prefix.
+
+    A line longer than the size cap can instead arrive as overlapping windows (see
+    ``StreamReader.range_lines``). Each window carries the span ``[emit_from, emit_until)`` of
+    ``text`` it is responsible for, so overlapping text is searched once; ``emit_until`` is
+    ``None`` for a whole line and for the last window. ``byte_length`` then counts only the
+    bytes of that span. A named tuple rather than a dataclass: one is created per line, and
+    that is several times cheaper.
     """
 
     text: str
     byte_length: int
     truncated: bool = False
+    emit_from: int = 0
+    emit_until: int | None = None
+
+    @property
+    def is_window(self) -> bool:
+        """Whether this is one window of a longer line rather than a whole line."""
+        return self.emit_from > 0 or self.emit_until is not None
+
+
+class TextBlock(NamedTuple):
+    """Several whole lines, or one window of a very long line, decoded as one piece of text.
+
+    For a pattern that never matches across a line break, searching a block is much faster than
+    searching its lines one by one. ``byte_length`` is the on-disk size of the block,
+    ``line_count`` the number of lines it holds (``0`` for a window that continues a line). A
+    window of a long line carries the span ``[emit_from, emit_until)`` it answers for, exactly
+    as ``TextLine`` does.
+    """
+
+    text: str
+    byte_length: int
+    line_count: int
+    emit_from: int = 0
+    emit_until: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +85,7 @@ class StructureInfo:
     has_header: bool | None = None
     pattern: str | None = None
     field_types: Mapping[str, tuple[str, ...]] | None = None
+    multiline_records: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -68,6 +100,7 @@ class StructureInfo:
                 if self.field_types is not None
                 else None
             ),
+            "multiline_records": self.multiline_records,
         }
 
 
@@ -86,15 +119,23 @@ class StructureAnalysis:
 
 @dataclass(frozen=True, slots=True)
 class RecordEstimate:
+    """How many records a file holds, counted in ``unit``.
+
+    ``unit`` is ``"records"`` where one line is one record (JSON Lines) and ``"lines"``
+    elsewhere, because a CSV field in quotes may span several lines.
+    """
+
     count: int
     is_exact: bool
     method: str
     sampled_records: int
     sampled_bytes: int
+    unit: str = "lines"
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "count": self.count,
+            "unit": self.unit,
             "is_exact": self.is_exact,
             "method": self.method,
             "sampled_records": self.sampled_records,

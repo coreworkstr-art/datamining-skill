@@ -55,18 +55,15 @@ def write_contacts(path: Path, rows: int = 3000) -> list[str]:
 def test_a_second_holder_is_refused_while_the_first_is_inside(state_dir: Path) -> None:
     lock_file = state_dir / "job.lock"
 
-    with JobLock(lock_file):
-        with pytest.raises(JobLockedException, match="already running"):
-            with JobLock(lock_file):
-                pytest.fail("the second holder must never get in")
+    with JobLock(lock_file), pytest.raises(JobLockedException, match="already running"), JobLock(lock_file):
+        pytest.fail("the second holder must never get in")
 
 
 def test_lock_is_released_after_the_body_raises(state_dir: Path) -> None:
     lock_file = state_dir / "job.lock"
 
-    with pytest.raises(RuntimeError):
-        with JobLock(lock_file):
-            raise RuntimeError("worker failed")
+    with pytest.raises(RuntimeError), JobLock(lock_file):
+        raise RuntimeError("worker failed")
 
     with JobLock(lock_file):  # acquirable again: nothing leaked
         assert lock_file.exists()
@@ -95,9 +92,8 @@ def test_lock_is_dropped_when_the_holder_is_killed(state_dir: Path) -> None:
     assert holder.stdout is not None
     try:
         assert holder.stdout.readline().strip() == "locked"
-        with pytest.raises(JobLockedException):
-            with JobLock(lock_file):
-                pass
+        with pytest.raises(JobLockedException), JobLock(lock_file):
+            pass
 
         holder.kill()  # no cleanup of any kind runs in the holder
         holder.wait(timeout=30)

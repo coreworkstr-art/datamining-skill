@@ -15,6 +15,7 @@ from datamining_skill.domain.models import (
     EncodingInfo,
     MemorySnapshot,
     StructureAnalysis,
+    TextBlock,
     TextLine,
 )
 
@@ -50,8 +51,25 @@ class StreamReader(Protocol):
     ) -> Generator[TextLine, None, None]:
         """Yield the lines of bytes ``[start, end)``, never reading past ``end``.
 
-        With ``check_alignment`` the byte before ``start`` must be a line feed. Raises
+        A line over the size cap arrives as overlapping windows (see ``TextLine``). With
+        ``check_alignment`` the byte before ``start`` must be a line feed. Raises
         ``DataSourceUnavailableException`` if the file is shorter than ``end``.
+        """
+        ...
+
+    def range_blocks(
+        self,
+        path: Path,
+        encoding: EncodingInfo,
+        start: int,
+        end: int,
+        *,
+        check_alignment: bool = False,
+    ) -> Generator[TextBlock, None, None]:
+        """Like ``range_lines``, but yield runs of whole lines as single blocks of text.
+
+        A block never splits a line, apart from the windows of a line over the size cap. The
+        same errors are raised as by ``range_lines``.
         """
         ...
 
@@ -192,4 +210,16 @@ class BoundaryLocator(Protocol):
 
         ``None`` means there is none: one record is at least ``limit - start`` bytes long.
         """
+        ...
+
+
+class UniqueKeyStore(Protocol):
+    """Remembers which records were already written, so ``unique`` mining can drop repeats."""
+
+    def register(self, chunk_id: int, keys: Sequence[bytes]) -> list[bool]:
+        """Remember ``keys`` for ``chunk_id``; ``True`` marks each key not seen before."""
+        ...
+
+    def discard(self, chunk_id: int) -> None:
+        """Forget what an earlier, failed or interrupted attempt at ``chunk_id`` remembered."""
         ...

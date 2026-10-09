@@ -29,10 +29,9 @@ def load_simulation() -> ModuleType:
 
 
 if sys.platform == "win32":
+    import _winapi
     import ctypes
     from ctypes import wintypes
-
-    import _winapi
 
     def _create_junction(link: Path, target: Path) -> bool:
         try:

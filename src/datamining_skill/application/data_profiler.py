@@ -7,6 +7,7 @@ import os
 import time
 from collections.abc import Callable
 from contextlib import closing
+from dataclasses import replace
 from itertools import chain
 from pathlib import Path
 from typing import Any
@@ -20,7 +21,7 @@ from datamining_skill.domain.exceptions import (
     DataSourceUnavailableException,
     UnsupportedDataFormatException,
 )
-from datamining_skill.domain.models import FileProfile, MemorySnapshot, ProfilingStats
+from datamining_skill.domain.models import DataFormat, FileProfile, MemorySnapshot, ProfilingStats
 from datamining_skill.domain.ports import (
     ContentGuard,
     EncodingDetector,
@@ -142,6 +143,8 @@ class DataProfiler:
 
         data_offset = encoding.bom_length + match.analysis.header_bytes
         records = self._record_estimator.estimate(source, size_bytes, data_offset, encoding)
+        if match.data_format is DataFormat.JSONL:
+            records = replace(records, unit="records")
 
         memory_end = self._memory_probe.snapshot()
         stats = ProfilingStats(

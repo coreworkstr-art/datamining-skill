@@ -208,9 +208,12 @@ def test_record_longer_than_the_chunk_limit_cannot_be_partitioned(write_file: Wr
     path = write_file("giant.csv", f"id,name\n{normal}{giant}\n1,z\n")
     produced: list[ChunkMetadata] = []
 
-    with pytest.raises(UnsupportedDataFormatException, match="single record"):
+    def plan_everything() -> None:
         for chunk in make_engine(8 * GIB, config).plan(path, profile_of(path)):
             produced.append(chunk)
+
+    with pytest.raises(UnsupportedDataFormatException, match="single record"):
+        plan_everything()
 
     # Chunks before the oversized record were still delivered, aligned and within the cap.
     assert len(produced) >= 2

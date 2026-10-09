@@ -1,7 +1,7 @@
-"""Command-line interface: ``profile``, ``mine`` and ``mcp`` (see README.md for usage).
+"""Command-line interface: ``profile``, ``mine``, ``preview``, ``clean`` and ``mcp`` (see README.md).
 
-``profile`` and ``mine`` write JSON to stdout and log events to stderr; ``mcp`` keeps stdout
-for the protocol alone.
+``profile``, ``mine``, ``preview`` and ``clean`` write JSON to stdout and log events to stderr;
+``mcp`` keeps stdout for the protocol alone.
 
 Exit status: 0 success, 1 internal error, 2 unsupported format, 3 unavailable source, bad
 configuration, file-system or other library error, 4 mining finished with failed chunks,
@@ -20,46 +20,70 @@ import sys
 import traceback
 from collections.abc import Sequence
 from pathlib import Path
+from typing import TextIO
 
+from datamining_skill._version import __version__
 from datamining_skill.application.config import ProfilerConfig
-from datamining_skill.bootstrap import create_mcp_server, create_profiler, run_mining
+from datamining_skill.application.miner_worker import JSON_ESCAPES_MODES
+from datamining_skill.application.orchestrator import MiningProgress
+from datamining_skill.bootstrap import create_mcp_server, profile_source, run_mining
 from datamining_skill.domain.exceptions import (
     DataMiningException,
     InvalidConfigurationException,
     UnsupportedDataFormatException,
     printable,
 )
+from datamining_skill.infrastructure.cleanup import clean_workspace
 from datamining_skill.infrastructure.config_loader import load_config
-from datamining_skill.infrastructure.logging import configure_json_logging
+from datamining_skill.infrastructure.logging import configure_json_logging, disable_json_logging
 from datamining_skill.infrastructure.mcp_server import serve_stdio
+from datamining_skill.infrastructure.paths import check_path_text
+from datamining_skill.infrastructure.result_preview import (
+    DEFAULT_PREVIEW_ROWS,
+    MAX_PREVIEW_ROWS,
+    preview_result,
+)
+from datamining_skill.infrastructure.source_prep import DEFAULT_MAX_EXPANDED_BYTES
 
 ALLOWED_DIRS_ENV = "DATAMINING_SKILL_ALLOWED_DIRS"
 _LOG_LEVELS = ["DEBUG", "INFO", "WARNING", "ERROR"]
+_RESULT_SUFFIXES = (".csv", ".jsonl", ".ndjson")
 
+_MAIN_EXAMPLES = """\
+examples:
+  datamining-skill profile events.csv
+  datamining-skill mine events.csv emails.csv --unique --lowercase
+  datamining-skill preview emails.csv
+  datamining-skill mcp --allow-dir ~/data
 
-def validate_workspace_path(workspace: Path) -> None:
-    """Validate workspace path doesn't exceed Windows limits."""
-    if os.name == 'nt':
-        max_path_length = 260
-        if len(str(workspace.resolve())) >= max_path_length:
-            # sys.stderr üzerinden loglamak yerine doğrudan exception mesajına ekliyoruz.
-            # Böylece main() içindeki exception handler hatayı temiz bir formatta basacaktır.
-            raise InvalidConfigurationException(
-                f"Workspace path exceeds Windows limit of {max_path_length} characters: {workspace}"
-            )
+Everything runs on this machine; nothing is sent over a network.
+"""
+_MINE_EXAMPLES = """\
+examples:
+  datamining-skill mine export.csv emails.csv --unique --lowercase
+  datamining-skill mine app.log.gz addresses.jsonl
+  datamining-skill mine access.log hosts.csv --pattern "(?:\\d{1,3}\\.){3}\\d{1,3}" --fields ip
+
+An interrupted run resumes when the same command is repeated.
+"""
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="datamining-skill",
         description="Local-only, streaming data mining toolkit.",
+        epilog=_MAIN_EXAMPLES,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    commands = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    commands = parser.add_subparsers(dest="command", required=True, metavar="{profile,mine,preview,clean,mcp}")
 
-    profile = commands.add_parser("profile", help="profile a CSV, JSONL or log file")
+    profile = commands.add_parser(
+        "profile", help="profile a CSV, JSON, JSONL or log file (also gzip, bzip2, xz, zip)"
+    )
     profile.add_argument("path", help="file to profile (read-only, never copied)")
     profile.add_argument("--config", help="TOML file with a [profiler] table")
-    _add_logging_options(profile, default_level="INFO")
+    _add_logging_options(profile, default_level="WARNING")
 
     mine = commands.add_parser(
         "mine",
@@ -67,8 +91,12 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             "Extract data from SOURCE into OUTPUT (.csv, .jsonl or .ndjson), in "
             "memory-bounded chunks with crash-safe checkpoints. By default extracts "
-            "e-mail addresses. Re-running an interrupted job resumes it."
+            "e-mail addresses. Re-running an interrupted job resumes it; changing any "
+            "setting starts a new job. Compressed (gzip, bzip2, xz, zip) and UTF-16 "
+            "sources are converted to a temporary UTF-8 copy first."
         ),
+        epilog=_MINE_EXAMPLES,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     mine.add_argument("source", help="file to mine (read-only)")
     mine.add_argument("output", help="result file to write (.csv, .jsonl or .ndjson)")
@@ -88,14 +116,78 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="prefix CSV cells starting with = + - @ so spreadsheets do not run them",
     )
-    _add_logging_options(mine, default_level="INFO")
+    mine.add_argument("--lowercase", action="store_true", help="lower-case every extracted value")
+    mine.add_argument(
+        "--unique",
+        action="store_true",
+        help=(
+            "write each record once, across the whole file and resumed runs "
+            "(combine with --lowercase to ignore case)"
+        ),
+    )
+    mine.add_argument(
+        "--json-escapes",
+        choices=JSON_ESCAPES_MODES,
+        default="auto",
+        help=(
+            "decode JSON string escapes such as \\u0040 before searching: auto (JSON and "
+            "JSON Lines sources with the built-in e-mail extraction), on or off"
+        ),
+    )
+    mine.add_argument(
+        "--max-expanded-gib",
+        type=float,
+        default=DEFAULT_MAX_EXPANDED_BYTES / 1024**3,
+        metavar="GIB",
+        help="refuse a compressed source that expands beyond this size (default: %(default)g)",
+    )
+    mine.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="do not show the progress line (it appears only when stderr is a terminal)",
+    )
+    _add_logging_options(mine, default_level="WARNING")
+
+    preview = commands.add_parser(
+        "preview",
+        help="show the first records of a result file",
+        description="Print the first records of a .csv, .jsonl or .ndjson result file as JSON.",
+    )
+    preview.add_argument("path", help="result file written by 'mine'")
+    preview.add_argument(
+        "--rows",
+        type=int,
+        default=DEFAULT_PREVIEW_ROWS,
+        help=f"records to show, 1 to {MAX_PREVIEW_ROWS} (default: {DEFAULT_PREVIEW_ROWS})",
+    )
+    _add_logging_options(preview, default_level="WARNING")
+
+    clean = commands.add_parser(
+        "clean",
+        help="remove the state and scratch files of finished jobs",
+        description=(
+            "Remove the state databases and scratch files that finished jobs leave under "
+            "<workspace>/.scratch. Result files are never touched, and a job that is running "
+            "is skipped. Repeating the call of a job removed here needs --overwrite, because its "
+            "result file already exists."
+        ),
+    )
+    clean.add_argument("--workspace", help="the workspace whose .scratch folder to clean (default: current)")
+    clean.add_argument(
+        "--all",
+        action="store_true",
+        help="also remove jobs that have not finished (they can no longer be resumed)",
+    )
+    clean.add_argument("--dry-run", action="store_true", help="only report what would be removed")
+    _add_logging_options(clean, default_level="WARNING")
 
     mcp = commands.add_parser(
         "mcp",
         help="run the Model Context Protocol server on stdio",
         description=(
-            "Run an MCP server exposing profile_dataset and mine_dataset over stdio. "
-            "File arguments are restricted to the allowed directories."
+            "Run an MCP server exposing profile_dataset, mine_dataset, mining_status, "
+            "cancel_mining and preview_result over stdio. File arguments are restricted to "
+            "the allowed directories."
         ),
     )
     mcp.add_argument(
@@ -145,30 +237,98 @@ def _allowed_dirs(arguments: Sequence[str]) -> list[Path]:
     return directories
 
 
+class ProgressLine:
+    """A single self-overwriting progress line on a terminal."""
+
+    def __init__(self, stream: TextIO) -> None:
+        self._stream = stream
+        self._width = 0
+
+    def __call__(self, update: MiningProgress) -> None:
+        text = f"mining: {update.chunks_done}/{update.chunks_total} chunks, {update.records_written:,} records"
+        self._width = max(self._width, len(text))
+        self._stream.write(f"\r{text}")
+        self._stream.flush()
+
+    def finish(self) -> None:
+        """Erase the line so that the summary or an error starts on a clean one."""
+        if self._width:
+            self._stream.write("\r" + " " * self._width + "\r")
+            self._stream.flush()
+            self._width = 0
+
+
+def _progress_line(args: argparse.Namespace) -> ProgressLine | None:
+    if args.no_progress or not sys.stderr.isatty():
+        return None
+    return ProgressLine(sys.stderr)
+
+
 def _run_profile(args: argparse.Namespace) -> int:
     config = load_config(args.config) if args.config else ProfilerConfig()
-    json.dump(create_profiler(config).profile_as_dict(args.path), sys.stdout, indent=2)
+    json.dump(profile_source(args.path, config=config), sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return 0
+
+
+def _run_clean(args: argparse.Namespace) -> int:
+    workspace = Path(args.workspace) if args.workspace else Path.cwd()
+    outcomes = clean_workspace(workspace, include_unfinished=args.all, dry_run=args.dry_run)
+    removed = [outcome for outcome in outcomes if outcome.removed]
+    report: dict[str, object] = {
+        "dry_run": args.dry_run,
+        "jobs": [outcome.to_dict() for outcome in outcomes],
+        "removed_jobs": len(removed),
+        "freed_bytes": sum(outcome.size_bytes for outcome in removed),
+    }
+    if args.dry_run:
+        report["would_free_bytes"] = sum(o.size_bytes for o in outcomes if o.reason is None)
+    json.dump(report, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return 0
+
+
+def _run_preview(args: argparse.Namespace) -> int:
+    check_path_text(args.path, "the result path")
+    result = Path(args.path)
+    if result.suffix.lower() not in _RESULT_SUFFIXES:
+        raise InvalidConfigurationException("the result file must end in .csv, .jsonl or .ndjson")
+    if not result.is_file():
+        raise InvalidConfigurationException("the result path does not name an existing file")
+    json.dump(preview_result(result, args.rows), sys.stdout, indent=2)
     sys.stdout.write("\n")
     return 0
 
 
 def _run_mine(args: argparse.Namespace) -> int:
-    # Windows 260 character path limit validation
-    workspace_path = Path(args.workspace) if args.workspace else Path.cwd()
-    validate_workspace_path(workspace_path)
-
     fields = [name.strip() for name in args.fields.split(",")] if args.fields else None
-    summary = run_mining(
-        args.source,
-        args.output,
-        workspace=args.workspace,
-        pattern=args.pattern,
-        fields=fields,
-        overwrite=args.overwrite,
-        csv_formula_guard=args.csv_formula_guard,
-    )
+    progress = _progress_line(args)
+    try:
+        summary = run_mining(
+            args.source,
+            args.output,
+            workspace=args.workspace,
+            pattern=args.pattern,
+            fields=fields,
+            overwrite=args.overwrite,
+            csv_formula_guard=args.csv_formula_guard,
+            lowercase=args.lowercase,
+            unique=args.unique,
+            json_escapes=args.json_escapes,
+            max_expanded_bytes=int(args.max_expanded_gib * 1024**3),
+            on_progress=progress,
+        )
+    finally:
+        if progress is not None:
+            progress.finish()
     json.dump(summary.to_dict(), sys.stdout, indent=2)
     sys.stdout.write("\n")
+    if summary.already_complete:
+        print(
+            "note: this job already finished and its result is unchanged; "
+            "add --overwrite to run it again.",
+            file=sys.stderr,
+        )
     if not summary.succeeded:
         reason = f" First failure: {summary.first_error}." if summary.first_error else ""
         print(
@@ -190,14 +350,8 @@ CUSTOM_PATTERN_WARNING = (
 def _run_mcp(args: argparse.Namespace) -> int:
     if args.allow_custom_patterns:
         print(CUSTOM_PATTERN_WARNING, file=sys.stderr)  # stderr: stdout is the protocol channel
-    
-    # MCP server workspace is the first allowed dir, validate it if on Windows
-    allowed_dirs = _allowed_dirs(args.allow_dir)
-    if allowed_dirs:
-        validate_workspace_path(allowed_dirs[0])
-
     server = create_mcp_server(
-        allowed_dirs, allow_custom_patterns=args.allow_custom_patterns
+        _allowed_dirs(args.allow_dir), allow_custom_patterns=args.allow_custom_patterns
     )
     try:
         serve_stdio(server)
@@ -248,10 +402,18 @@ def _discard_stdout() -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
 
-    if not args.no_logs:
+    if args.no_logs:
+        disable_json_logging()
+    else:
         configure_json_logging(getattr(logging, args.log_level), stream=sys.stderr)
 
-    handlers = {"profile": _run_profile, "mine": _run_mine, "mcp": _run_mcp}
+    handlers = {
+        "profile": _run_profile,
+        "mine": _run_mine,
+        "preview": _run_preview,
+        "clean": _run_clean,
+        "mcp": _run_mcp,
+    }
     try:
         code = handlers[args.command](args)
         sys.stdout.flush()
@@ -259,8 +421,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     except UnsupportedDataFormatException as exc:
         return _fail(str(exc), EXIT_UNSUPPORTED, args.debug)
     except DataMiningException as exc:
-        # InvalidConfigurationException inherits from DataMiningException, 
-        # so this block will catch it and return EXIT_FAILURE (3).
         return _fail(str(exc), EXIT_FAILURE, args.debug)
     except OSError as exc:
         if _is_closed_pipe(exc):
@@ -270,6 +430,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     except UnicodeDecodeError:
         return _fail("a file is not valid UTF-8 text", EXIT_FAILURE, args.debug)
     except KeyboardInterrupt:
+        if args.command == "mine":
+            print("interrupted: run the same command again to resume.", file=sys.stderr)
         return EXIT_INTERRUPTED
     except Exception as exc:  # noqa: BLE001 - last resort: never show a raw traceback unasked
         return _fail(
