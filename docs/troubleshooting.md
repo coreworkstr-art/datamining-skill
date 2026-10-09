@@ -71,15 +71,16 @@ may treat it as a formula. Mine with `--csv-formula-guard`.
 
 ## Speed
 
-A rough guide, on a laptop-class machine with an SSD: a log file where one line in a hundred has
-an address is mined at 60 to 90 MiB/s; a CSV with an address on every row at 15 to 40 MiB/s.
-The work is single-threaded and bound by the interpreter, so a faster disk does not help much.
-What does:
+A rough guide, on a laptop-class machine with an SSD: a log file with an address every few
+kilobytes is mined at 200 MiB/s or more; a CSV with an address on every row at 15 to 25 MiB/s.
+The work is single-threaded and bound by the interpreter, so a faster disk does not help much
+once the rows are dense. What does:
 
 - Keep the source and the workspace on a **local** disk.
 - On Windows, exclude the workspace's `.scratch` folder from real-time antivirus scanning if it
   slows the run noticeably: it holds many small writes.
-- Prefer the built-in extraction to a custom pattern: it skips lines without an `@` outright.
+- Prefer the built-in extraction to a custom pattern: it finds each `@` with a plain string search
+  and runs the pattern only around it, which is far quicker on text where addresses are rare.
 - Do not run with `--log-level DEBUG` for a large file.
 
 Interrupting a run is always safe: repeat the command and it resumes.

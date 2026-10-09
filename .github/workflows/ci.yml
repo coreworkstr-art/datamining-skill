@@ -72,7 +72,24 @@ jobs:
         run: python -m mypy
 
       - name: Test
-        run: python -m pytest -ra --durations=10
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -ra --durations=10 | tee "$RUNNER_TEMP/pytest.log"
+
+      - name: Name the failing tests
+        if: failure()
+        shell: bash
+        run: |
+          # a failed run shows only "exit code 1" to visitors who are not signed in
+          grep -E '^(FAILED|ERROR) ' "$RUNNER_TEMP/pytest.log" | head -n 10 | cut -c1-900 |
+            while IFS= read -r line; do echo "::error title=pytest::${line//%/%25}"; done || true
+          {
+            echo '### Failing tests'
+            echo '```'
+            grep -E '^(FAILED|ERROR) ' "$RUNNER_TEMP/pytest.log" | head -n 60 | cut -c1-400 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Resource-leak gate (dev mode, unclosed files and connections fail the run)
         if: matrix.python-version == '3.14'

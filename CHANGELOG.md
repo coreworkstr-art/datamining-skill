@@ -51,8 +51,10 @@ All notable changes are recorded here. The format follows
   skipped, with memory still bounded; `oversized_lines` counts them.
 - `mine` logs at WARNING by default (it used to print every chunk event as JSON); use
   `--log-level INFO` for them. `profile` is quiet by default as well.
-- Faster: a line without an `@` is skipped before any pattern runs (a log file mines about
-  2.5 times faster) and the CSV writer is bypassed for values that need no quoting.
+- Faster: the built-in extraction finds each `@` with a plain string search and runs the pattern only
+  around it, lines are searched in blocks, and the CSV writer is bypassed for values that need no
+  quoting. A log file with a rare address mines about ten times faster, a CSV with one on every
+  row about one and a half times.
 - The state database is schema 3 (a v2 database is upgraded in place).
 - Docstrings and comments were condensed and point to `docs/architecture.md`; test and script
   fixtures use reserved `.test` domains and enterprise-style sample data.
