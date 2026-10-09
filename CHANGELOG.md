@@ -83,6 +83,9 @@ All notable changes are recorded here. The format follows
   have long paths enabled; a system that cannot open the path reports the operating system's error.
 - Logging handlers no longer pile up when the command-line entry point is called repeatedly in
   one process.
+- **macOS printed a warning on every run.** macOS cannot report free memory through `sysconf`, so
+  each `mine` logged `chunking.memory_unavailable` at WARNING and broke the quiet default. The
+  documented 512 MiB assumption is now logged at INFO.
 
 ### Security
 

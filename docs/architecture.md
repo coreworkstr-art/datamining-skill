@@ -148,8 +148,9 @@ Design decisions:
   profile's size, a `chunking.profile_stale` warning is logged.
 - **No `psutil`.** Available memory comes from `GlobalMemoryStatusEx` (Windows) or
   `/proc/meminfo` `MemAvailable` (Linux), keeping the runtime dependency-free. Where the
-  platform cannot report it, `fallback_available_bytes` (512 MiB) is assumed and a
-  `chunking.memory_unavailable` warning is logged.
+  platform cannot report it (macOS), `fallback_available_bytes` (512 MiB) is assumed and a
+  `chunking.memory_unavailable` event is logged at INFO: the fallback is a documented limit of
+  the platform, so a default run stays silent.
 
 ### Chunk contract
 
@@ -175,7 +176,7 @@ column names from the profile.
 | `chunking.started` | INFO | file name, size, available memory, fraction, chunk size, expected chunk count |
 | `chunking.completed` | INFO | chunk count, chunk size, duration |
 | `chunking.failed` | WARNING | error type and message (low RAM, unpartitionable record) |
-| `chunking.memory_unavailable` | WARNING | assumed available bytes |
+| `chunking.memory_unavailable` | INFO | assumed available bytes |
 | `chunking.profile_stale` | WARNING | profiled vs. current size |
 
 ## State manager

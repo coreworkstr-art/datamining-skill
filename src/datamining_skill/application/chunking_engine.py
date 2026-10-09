@@ -101,7 +101,7 @@ class ChunkingEngine:
             available = config.fallback_available_bytes
             emit_event(
                 self._logger,
-                logging.WARNING,
+                logging.INFO,  # the normal case on macOS: expected, not a fault
                 "chunking.memory_unavailable",
                 assumed_available_bytes=available,
             )

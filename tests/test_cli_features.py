@@ -208,3 +208,17 @@ def test_mine_is_quiet_by_default_and_logs_on_request(state_dir: Path, capsys: p
 
     assert main(["mine", str(state_dir / "in.csv"), str(state_dir / "b.csv"), "--workspace", str(state_dir), "--log-level", "INFO"]) == 0
     assert '"event":"mining.completed"' in capsys.readouterr().err
+
+
+def test_a_platform_that_cannot_report_free_memory_is_still_quiet(
+    state_dir: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # macOS: sysconf has no SC_AVPHYS_PAGES, so the probe answers "unknown" on every run
+    monkeypatch.setattr("datamining_skill.infrastructure.system_memory._read_available", lambda: None)
+    write_contacts(state_dir / "in.csv")
+
+    assert main(["mine", str(state_dir / "in.csv"), str(state_dir / "a.csv"), "--workspace", str(state_dir)]) == 0
+    assert capsys.readouterr().err == ""
+
+    assert main(["mine", str(state_dir / "in.csv"), str(state_dir / "b.csv"), "--workspace", str(state_dir), "--log-level", "INFO"]) == 0
+    assert '"event":"chunking.memory_unavailable"' in capsys.readouterr().err
