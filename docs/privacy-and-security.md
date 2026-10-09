@@ -55,8 +55,8 @@ the person who started it.
 | Planted `.scratch` symlink or junction | `run_layout` refuses a `.scratch` that resolves outside the workspace; otherwise state and chunk files, which contain mined data, could be redirected anywhere. |
 | Overwriting arbitrary files through `output_path` | Output must end in `.csv`, `.jsonl` or `.ndjson` and be inside an allowed directory; an existing result is never replaced unless `overwrite` is true; the output may not be the source file. |
 | Denial of service through a model-written regular expression | `pattern`/`fields` are not even declared unless the operator starts the server with `--allow-custom-patterns`, which prints a warning to stderr at startup. Even then, patterns that repeat a repeating group without an upper bound (`(a+)+`, `(a{1,64})+`) are rejected. This filter is defence in depth, not a guarantee: `re` has no time limit and overlapping alternations such as `(a\|aa)+` are not detected. |
-| A decompression bomb (`bomb.csv.gz`) | A compressed source is expanded as a stream into a private file in `.scratch/`, never into memory. The expansion is capped (`--max-expanded-gib`, default 64 GiB) and stops when less than 1 GiB of disk is free; the partial copy is deleted. A zip archive must hold exactly one unencrypted file. |
-| Reading a result file through `preview_result` | Only `.csv`, `.jsonl` and `.ndjson` files inside the allowed directories, and at most 256 KiB are read, whatever the file's size. |
+| A decompression bomb (`bomb.csv.gz`) | A compressed source is expanded as a stream into a private file in `.scratch/`, never into memory. The expansion is capped (`--max-expanded-gib`, default 64 GiB) and stops when less than 1 GiB of disk is free; the partial copy is deleted. A zip archive must hold exactly one unencrypted file, and its member name is never used as a path. The copy is created with `O_NOFOLLOW` and a symbolic link planted in the place of its temporary file is refused, so a conversion cannot be made to overwrite another file. |
+| Reading a result file through `preview_result` | Only `.csv`, `.jsonl` and `.ndjson` regular files inside the allowed directories, and at most 256 KiB are read, whatever the file's size. Over-deep JSON and oversized CSV values cannot make it fail. The rows are file content that reaches the model, so the skill instructs the assistant to treat them as data and never as instructions. |
 | Exhausting the machine with background jobs | At most four run at once; an identical job cannot be started twice; they use the same bounded-memory pipeline and the same per-job lock as a foreground run. |
 | Oversized or malformed messages | Messages are read in bounded pieces (1 MiB limit) and rejected without losing synchronisation; JSON that is too deep is rejected as a parse error. |
 | Over-broad workspace | With no `--allow-dir` and no `DATAMINING_SKILL_ALLOWED_DIRS`, the server uses its working directory and refuses to start if that is the filesystem root. |
@@ -77,6 +77,9 @@ Residual risks, stated plainly:
   the result file (it is owner-only and removed when the job finishes).
 - A converted copy of a compressed or UTF-16 source holds the whole text while a job is unfinished.
   If a run is abandoned, `datamining-skill clean --all` removes it.
+- Opening a zip archive reads its list of entries into memory. An archive from an untrusted source
+  that lists millions of entries needs memory in proportion before the "exactly one file" check can
+  refuse it. Mine archives you trust, or extract the file first.
 
 ## Security controls and how they are verified
 

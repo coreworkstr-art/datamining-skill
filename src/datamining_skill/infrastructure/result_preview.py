@@ -32,10 +32,18 @@ def preview_result(path: Path, rows: int = DEFAULT_PREVIEW_ROWS) -> dict[str, An
     complete = size <= len(head)
 
     if path.suffix.lower() == ".csv":
-        table = list(csv.reader(line + "\n" for line in lines))  # a line break can be part of a value
+        table: list[list[str]] = []
+        cut_short = False
+        try:
+            for row in csv.reader(line + "\n" for line in lines):  # a line break can be part of a value
+                table.append(row)
+                if len(table) > rows + 1:
+                    break
+        except csv.Error:  # a value over the csv module's 128 KiB limit: show what came before it
+            cut_short = True
         columns = table[0] if table else []
         records: list[Any] = table[1 : 1 + rows]
-        has_more = len(table) - 1 > rows or not complete
+        has_more = len(table) - 1 > rows or not complete or cut_short
         return {
             "file": path.name,
             "format": "csv",
@@ -50,7 +58,7 @@ def preview_result(path: Path, rows: int = DEFAULT_PREVIEW_ROWS) -> dict[str, An
     for line in lines[:rows]:
         try:
             shown.append(json.loads(line))
-        except ValueError:
+        except (ValueError, RecursionError):  # not JSON, or nested deeper than the parser allows
             shown.append(line)
     return {
         "file": path.name,

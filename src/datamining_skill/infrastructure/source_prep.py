@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import IO, cast
 
 from datamining_skill.domain.exceptions import (
+    InvalidConfigurationException,
     ResourceExhaustionError,
     UnsupportedDataFormatException,
 )
@@ -33,7 +34,13 @@ DEFAULT_MAX_EXPANDED_BYTES = 64 * 1024**3
 _BLOCK_BYTES = 1024 * 1024
 _FREE_CHECK_INTERVAL = 64 * 1024 * 1024
 _MIN_FREE_BYTES = 1024 * 1024 * 1024  # never leave the volume nearly full for other programs
-_CREATE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0)
+_CREATE_FLAGS = (
+    os.O_WRONLY
+    | os.O_CREAT
+    | os.O_TRUNC
+    | getattr(os, "O_BINARY", 0)  # Windows: no newline translation
+    | getattr(os, "O_NOFOLLOW", 0)  # POSIX: never write through a symlink
+)
 
 _COMPRESSION_MAGIC = (
     (b"\x1f\x8b", "gzip"),
@@ -95,6 +102,8 @@ def convert_to_utf8(
     written = 0
     since_check = 0
     done = False
+    if partial.is_symlink():  # a planted link must not redirect the write to another file
+        raise InvalidConfigurationException("the temporary conversion file is a symbolic link")
     descriptor = os.open(partial, _CREATE_FLAGS, PRIVATE_FILE_MODE)
     try:
         with os.fdopen(descriptor, "wb") as sink, _open_stream(source, compression) as reader:

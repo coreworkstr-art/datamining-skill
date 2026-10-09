@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from datamining_skill import (
+    InvalidConfigurationException,
     MiningProgress,
     UnsupportedDataFormatException,
     run_mining,
@@ -179,6 +180,23 @@ def test_a_decompression_bomb_is_stopped_at_the_limit_and_leaves_nothing(state_d
 
     assert [p for p in (state_dir / ".scratch").rglob("*") if p.is_file() and p.suffix in (".utf8", ".partial")] == []
     assert not (state_dir / "out.csv").exists()
+
+
+def test_a_planted_link_cannot_redirect_the_converted_copy(state_dir: Path) -> None:
+    source = state_dir / "in.csv.gz"
+    source.write_bytes(gzip.compress(CSV_BYTES))
+    victim = state_dir / "victim.txt"
+    victim.write_text("retained export")
+    try:
+        (state_dir / "converted.utf8.partial").symlink_to(victim)
+    except (OSError, NotImplementedError):
+        pytest.skip("symbolic links are not available to this user")
+
+    with pytest.raises(InvalidConfigurationException, match="symbolic link"):
+        convert_to_utf8(source, state_dir / "converted.utf8")
+
+    assert victim.read_text() == "retained export"
+    assert not (state_dir / "converted.utf8").exists()
 
 
 def test_damaged_compressed_data_is_reported_plainly(state_dir: Path) -> None:

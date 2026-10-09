@@ -83,6 +83,8 @@ All notable changes are recorded here. The format follows
   have long paths enabled; a system that cannot open the path reports the operating system's error.
 - Logging handlers no longer pile up when the command-line entry point is called repeatedly in
   one process.
+- `preview_result` no longer fails on a JSON Lines record nested deeper than the parser allows or on a
+  CSV value over 128 KiB; it keeps the line as text or shows the rows before the value.
 - **macOS printed a warning on every run.** macOS cannot report free memory through `sysconf`, so
   each `mine` logged `chunking.memory_unavailable` at WARNING and broke the quiet default. The
   documented 512 MiB assumption is now logged at INFO.
@@ -101,6 +103,10 @@ All notable changes are recorded here. The format follows
 - Custom MCP patterns that repeat a repeating group without an upper bound (`(a+)+`) are rejected,
   and enabling custom patterns prints a warning to stderr.
 - Error messages escape non-printable characters in file names so they cannot rewrite a terminal.
+- The temporary file of a source conversion is opened with `O_NOFOLLOW` and refused when it is a
+  symbolic link, so a planted link cannot make a conversion overwrite another file.
+- The skill tells the assistant to treat column names, keys and preview rows as data, never as
+  instructions (prompt injection through a mined file).
 - Converted copies of compressed or UTF-16 sources are created owner-only, are size-capped and
   never outlive a finished job.
 - Added a security regression suite (path attacks, link escapes, ReDoS, network isolation, SQL

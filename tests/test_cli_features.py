@@ -141,6 +141,25 @@ def test_preview_clamps_the_row_count(state_dir: Path) -> None:
     assert preview_result(state_dir / "r.csv", 10_000)["rows_returned"] == 2
 
 
+def test_preview_survives_json_nested_deeper_than_the_parser_allows(state_dir: Path) -> None:
+    depth = 100_000
+    (state_dir / "r.jsonl").write_text("[" * depth + "]" * depth + '\n{"a": 1}\n', encoding="utf-8")
+
+    shown = preview_result(state_dir / "r.jsonl", 5)
+
+    assert shown["rows_returned"] == 2 and shown["rows"][1] == {"a": 1}
+    assert isinstance(shown["rows"][0], str)  # kept as text instead of raising RecursionError
+
+
+def test_preview_shows_what_precedes_a_csv_value_over_the_field_limit(state_dir: Path) -> None:
+    (state_dir / "r.csv").write_text("id,note\n1,short\n2," + "x" * 200_000 + "\n3,after\n", encoding="utf-8")
+
+    shown = preview_result(state_dir / "r.csv", 10)
+
+    assert shown["columns"] == ["id", "note"] and shown["rows"] == [["1", "short"]]
+    assert shown["has_more"] is True
+
+
 def test_preview_of_an_empty_result_has_no_rows(state_dir: Path) -> None:
     (state_dir / "r.csv").write_text("email\n")
 
