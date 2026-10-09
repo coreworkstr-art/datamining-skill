@@ -28,7 +28,7 @@ infrastructure  ──▶  application  ──▶  domain
 | `RecordFormatter` | `CsvFormatter`, `JsonlFormatter` |
 | `EncodingDetector` | `StdlibEncodingDetector` |
 | `ContentGuard` | `BinaryContentGuard` |
-| `FormatHandler` | `JsonlHandler`, `CsvHandler`, `LogHandler` |
+| `FormatHandler` | `JsonlHandler`, `CsvHandler`, `LogHandler`, `JsonDocumentHandler` |
 | `MemoryProbe` | `ProcessMemoryProbe` |
 | `AvailableMemoryProvider` | `SystemMemoryProbe` |
 | `BoundaryLocator` | `NewlineBoundaryLocator` |

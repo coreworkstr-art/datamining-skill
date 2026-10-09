@@ -2,7 +2,7 @@
 
 `datamining-skill mcp` serves five tools over standard input/output. This page describes each
 one: what it is for, its arguments, what it returns and what can go wrong. For how to connect
-a client see the [README](../README.md#use-it-from-an-ai-assistant-mcp); for the threat model see
+a client see the [README](../README.md#use-it-from-an-ai-assistant); for the threat model see
 [privacy-and-security.md](privacy-and-security.md).
 
 All tools run on this machine and never use the network. Every file argument must lie inside a

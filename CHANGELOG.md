@@ -56,6 +56,11 @@ All notable changes are recorded here. The format follows
   quoting. A log file with a rare address mines about ten times faster, a CSV with one on every
   row about one and a half times.
 - The state database is schema 3 (a v2 database is upgraded in place).
+- The README opens in plainer words and no longer claims more than the tests show (for example
+  "strictly" confined access, or a single record never lost in any failure). It gained a note on
+  processing personal data and a statement that the project is not affiliated with the clients it
+  names. Two stale details in the documentation were corrected (a broken link, the list of format
+  handlers).
 - Docstrings and comments were condensed and point to `docs/architecture.md`; test and script
   fixtures use reserved `.test` domains and enterprise-style sample data.
 

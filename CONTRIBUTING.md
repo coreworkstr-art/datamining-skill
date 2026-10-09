@@ -143,5 +143,5 @@ reviewer if you want a manual gate), and set the variable `PUBLISH_TO_PYPI` to `
 ## Reporting bugs
 
 Include the command or call you ran, what you expected, what happened, your OS and Python
-version, and the output of `datamining-skill --help | head -1` (it shows the installed
-command). **Do not attach real data**; reduce the problem to a small synthetic file.
+version, and the output of `datamining-skill --version`. **Do not attach real data**; reduce the
+problem to a small synthetic file.

@@ -63,7 +63,7 @@ the person who started it.
 | Corrupting the protocol channel | stdout carries only JSON-RPC messages; `print` is redirected to stderr while serving. |
 | Leaking information in results | Tool results contain names, counts, workspace-relative paths and (for `profile_dataset`) column names or JSON keys. Mined records go only to the output file; they are never returned to the client or logged. |
 
-Residual risks, stated plainly:
+Residual risks:
 
 - The result file and `profile_dataset` output reflect the data the assistant was allowed to
   read. Column names and JSON keys come from the file and are shown to the model; a hostile
@@ -162,6 +162,9 @@ override could rewrite the user's terminal, so messages escape every non-printab
 - The **mining result file contains the extracted data itself** (for example e-mail
   addresses), unencrypted. Choose its location and permissions accordingly, and delete
   it when no longer needed. Do not rely on the toolkit to anonymise it.
+- E-mail addresses and most other extracted values are personal data under laws such as the GDPR
+  and the KVKK. Establish a lawful basis before mining, limit who can read the result, decide how
+  long you keep it, and delete it together with the `.scratch/` state when it is no longer needed.
 - If a mining process is killed, the result file may end in uncommitted bytes until the
   run is resumed; treat the file as final only after a run has completed.
 - Opening a mined CSV in a spreadsheet can execute formulas hidden in the data. Enable

@@ -1,12 +1,15 @@
 # DataMining Skill
 
-**Mine huge files on a small machine, privately, and let an AI assistant drive it.**
+A command-line tool, Python library and MCP server that pulls data out of very large text files
+(CSV, TSV, JSON, JSON Lines and logs) on an ordinary computer. It reads a file in pieces, so the
+memory it needs depends on its settings and not on the size of the file, and it keeps checkpoints,
+so a run that was interrupted can be started again and carries on where it stopped.
 
-A local-only, streaming-first data mining toolkit. It profiles and mines CSV, JSON, JSONL and
-log files far larger than your RAM in constant memory, survives being killed at any instant
-without losing or duplicating a single record, and plugs into Claude Code, Claude Desktop,
-Cursor and any other [Model Context Protocol](https://modelcontextprotocol.io) client as a tool
-and as a skill.
+It was written for one job in particular: getting a clean list of e-mail addresses out of a large
+export or log. You can also give it your own regular expression. You can run it from a terminal,
+call it from Python, or let an AI assistant that speaks the
+[Model Context Protocol](https://modelcontextprotocol.io) (Claude Code, Claude Desktop, Cursor and
+others) use it through the included MCP server and skill.
 
 [![CI](https://github.com/coreworkstr-art/datamining-skill/actions/workflows/ci.yml/badge.svg)](https://github.com/coreworkstr-art/datamining-skill/actions/workflows/ci.yml)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
@@ -15,16 +18,19 @@ and as a skill.
 ![Type checked: mypy strict](https://img.shields.io/badge/mypy-strict-blue)
 ![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)
 
-- **Private by design.** Everything runs on your machine. No network code, no telemetry, no
-  third-party packages. Your data is never sent anywhere.
-- **Constant memory.** A 100 GB file on an 8 GB laptop is fine: every buffer is bounded, so
-  memory depends on configuration, never on file size.
-- **Crash-safe and resumable.** Kill it, lose power, run it again: the result is exactly what an
-  uninterrupted run would have produced.
-- **Practical.** A clean list of distinct e-mail addresses from a messy export in one command;
-  gzip, zip and Excel "Unicode Text" files read directly; a very large log mined in seconds.
-- **AI-ready.** An MCP server with five tools, a Claude Code plugin and a skill that tells the
-  assistant when and how to use them, with strictly workspace-confined file access.
+What to expect:
+
+- Everything runs on your machine. The program has no network code, no telemetry and no
+  third-party packages, and it never sends your data anywhere.
+- Every buffer has a fixed upper size, so memory use follows the configuration and not the file.
+  The test suite checks this, and the [Performance](#performance) figures include a 10 GiB file.
+- If a run is killed or the power goes, running the same command again finishes the job with the
+  same records an uninterrupted run would have written. [Limitations](#limitations) lists the
+  details, such as the order of records after a retry.
+- One command turns a messy export into a list of distinct, lower-case addresses. gzip, bzip2, xz
+  and single-file zip archives, and Excel's "Unicode Text" (UTF-16) files, are read directly.
+- For assistants there are five MCP tools, a Claude Code plugin and a skill that explains when to
+  use them. File access is limited to the directories you list.
 
 ## Contents
 
@@ -98,9 +104,9 @@ standard input/output, so an assistant can inspect and mine local files on your 
 
 Every argument is described in [docs/mcp-tools.md](docs/mcp-tools.md).
 
-**You decide which directories the assistant may touch.** Every file argument is resolved
-(symlinks and `..` included) and must lie inside a directory you list with `--allow-dir`;
-anything else is refused. The first `--allow-dir` is the workspace for relative paths.
+The assistant can only reach the directories you list. Every file argument is resolved (symlinks
+and `..` included) and must lie inside a directory given with `--allow-dir`; anything else is
+refused. The first `--allow-dir` is the workspace for relative paths.
 
 ### Claude Code
 
@@ -185,7 +191,8 @@ Create `.cursor/mcp.json` in your project (or `~/.cursor/mcp.json` for all proje
 - **Custom patterns** (`pattern` and `fields` arguments) are off by default: a model-written
   regular expression can be crafted to backtrack catastrophically and stall your machine. Start
   the server with `--allow-custom-patterns` only if you accept that. The built-in e-mail
-  extraction is safe on hostile input.
+  extraction is not affected: it uses bounded patterns, and the test suite runs it against hostile
+  lines a megabyte long under a time limit.
 - Verify an installation without a client: `python scripts/mcp_smoke_test.py` performs a full
   handshake, profile and mine against the installed command and exits non-zero on any problem.
 
@@ -383,17 +390,19 @@ bound by the interpreter. Mining is single-threaded. See
 
 ## Guarantees
 
-- **Local only.** The runtime imports no networking modules and has no dependencies.
-- **Source files are read-only.** They are never modified, indexed or kept. A compressed or UTF-16
+- The runtime imports no networking modules and has no dependencies.
+- Source files are only read. They are never modified, indexed or kept. A compressed or UTF-16
   source is converted to a private temporary copy that is deleted when the job finishes.
-- **Footprint you can see.** Besides the result file you name, only a small state database and
-  short-lived scratch files are written, confined to `.scratch/` or `data/` (never the system
-  temporary directory), owner-only (`0600`/`0700` on POSIX, a protected ACL on Windows).
-- **No content in logs or errors.** Logs and messages carry names, sizes, ids and counts.
-- **Data is data.** Input is tokenised, never evaluated: no `eval`, `pickle` or dynamic import on
-  the data path; JSON, CSV and regular-expression parsing use bounded, standard-library tools.
-- **Exactly-once results.** Verified by killing real processes at three different points while
-  mining a 50 MiB file: the output matched the planted records exactly, in order, every time.
+- Besides the result file you name, only a small state database and short-lived scratch files are
+  written. They stay in `.scratch/` or `data/`, never in the system temporary directory, and are
+  readable by the owner only (`0600`/`0700` on POSIX, a protected ACL on Windows).
+- Logs and error messages carry names, sizes, ids and counts, not file contents.
+- Input is parsed and never evaluated: there is no `eval`, `pickle` or dynamic import on the data
+  path, and JSON, CSV and regular-expression handling use bounded standard-library tools.
+- Each record is written exactly once. This was tested by killing real processes at three
+  different points while mining a 50 MiB file; the output matched the planted records exactly, in
+  order, every time. A power cut is the one case that can repeat work, never corrupt it (see
+  [Limitations](#limitations)).
 
 ## Limitations
 
@@ -474,6 +483,18 @@ Contributions are welcome under any name or pseudonym. Please read
 [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md). Report security
 issues privately as described in [SECURITY.md](SECURITY.md). Changes are recorded in
 [CHANGELOG.md](CHANGELOG.md).
+
+## Using it responsibly
+
+E-mail addresses are personal data under the GDPR in the EU, the KVKK in Turkey and comparable
+laws elsewhere. The program extracts whatever you point it at and cannot tell whether you may.
+Make sure you have a lawful basis for processing the source data and for what you do with the
+result, and keep result files as well protected as the source. Extracting addresses to send
+unsolicited mail is a misuse of this tool.
+
+DataMining Skill is an independent project. It is not affiliated with, endorsed or sponsored by
+Anthropic, Cursor or the Model Context Protocol project. Claude, Claude Code, Claude Desktop and
+Cursor are names of their owners, used here only to say which clients it works with.
 
 ## License
 
