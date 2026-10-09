@@ -141,14 +141,22 @@ def test_preview_clamps_the_row_count(state_dir: Path) -> None:
     assert preview_result(state_dir / "r.csv", 10_000)["rows_returned"] == 2
 
 
-def test_preview_survives_json_nested_deeper_than_the_parser_allows(state_dir: Path) -> None:
-    depth = 100_000
+@pytest.mark.parametrize("depth", [40, 100_000])  # past the cap; far past what some parsers accept
+def test_preview_keeps_json_nested_too_deeply_as_text(state_dir: Path, depth: int) -> None:
     (state_dir / "r.jsonl").write_text("[" * depth + "]" * depth + '\n{"a": 1}\n', encoding="utf-8")
 
     shown = preview_result(state_dir / "r.jsonl", 5)
 
     assert shown["rows_returned"] == 2 and shown["rows"][1] == {"a": 1}
-    assert isinstance(shown["rows"][0], str)  # kept as text instead of raising RecursionError
+    assert isinstance(shown["rows"][0], str)  # text, whether the parser refused it or the cap did
+
+
+def test_preview_keeps_ordinary_nesting_as_structure(state_dir: Path) -> None:
+    (state_dir / "r.jsonl").write_text('{"user": {"tags": [["a", "b"], {"k": [1, 2]}]}}\n', encoding="utf-8")
+
+    shown = preview_result(state_dir / "r.jsonl", 5)
+
+    assert shown["rows"] == [{"user": {"tags": [["a", "b"], {"k": [1, 2]}]}}]
 
 
 def test_preview_shows_what_precedes_a_csv_value_over_the_field_limit(state_dir: Path) -> None:

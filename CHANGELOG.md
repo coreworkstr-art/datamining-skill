@@ -84,7 +84,9 @@ All notable changes are recorded here. The format follows
 - Logging handlers no longer pile up when the command-line entry point is called repeatedly in
   one process.
 - `preview_result` no longer fails on a JSON Lines record nested deeper than the parser allows or on a
-  CSV value over 128 KiB; it keeps the line as text or shows the rows before the value.
+  CSV value over 128 KiB. A record nested more than 32 levels deep is shown as text (the same on
+  every Python version, since some parse a hundred thousand levels), and a CSV preview stops
+  before an oversized value.
 - **macOS printed a warning on every run.** macOS cannot report free memory through `sysconf`, so
   each `mine` logged `chunking.memory_unavailable` at WARNING and broke the quiet default. The
   documented 512 MiB assumption is now logged at INFO.

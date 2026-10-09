@@ -10,6 +10,24 @@ from typing import Any
 DEFAULT_PREVIEW_ROWS = 20
 MAX_PREVIEW_ROWS = 200
 _PREVIEW_BYTES = 256 * 1024
+_MAX_JSON_DEPTH = 32
+
+
+def _is_shallow(value: Any) -> bool:
+    """Whether ``value`` nests no deeper than a tool response can safely carry.
+
+    Some interpreters parse JSON nested a hundred thousand levels deep, which no client or
+    encoder handles; such a record is shown as text instead. Checked without recursion.
+    """
+    stack: list[tuple[Any, int]] = [(value, 1)]
+    while stack:
+        item, depth = stack.pop()
+        if isinstance(item, dict | list):
+            if depth > _MAX_JSON_DEPTH:
+                return False
+            children = item.values() if isinstance(item, dict) else item
+            stack.extend((child, depth + 1) for child in children)
+    return True
 
 
 def preview_result(path: Path, rows: int = DEFAULT_PREVIEW_ROWS) -> dict[str, Any]:
@@ -57,9 +75,11 @@ def preview_result(path: Path, rows: int = DEFAULT_PREVIEW_ROWS) -> dict[str, An
     shown: list[Any] = []
     for line in lines[:rows]:
         try:
-            shown.append(json.loads(line))
+            parsed = json.loads(line)
         except (ValueError, RecursionError):  # not JSON, or nested deeper than the parser allows
             shown.append(line)
+        else:
+            shown.append(parsed if _is_shallow(parsed) else line)
     return {
         "file": path.name,
         "format": "jsonl",
