@@ -1,7 +1,7 @@
 """The MCP tools and all validation of model-supplied input.
 
-Five tools: ``profile_dataset``, ``mine_dataset``, ``mining_status``, ``cancel_mining`` and
-``preview_result``. This module holds their declarations, a small argument validator for
+Six tools: ``profile_dataset``, ``mine_dataset``, ``mining_status``, ``cancel_mining``,
+``preview_result`` and ``check_quality``. This module holds their declarations, a small argument validator for
 exactly these schemas, and the ``WorkspacePolicy`` path confinement. JSON-RPC lives in
 ``mcp_server``; the profiler and mining runner are injected (see docs/architecture.md,
 "MCP server").
@@ -12,6 +12,8 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,8 +21,10 @@ from typing import Any, Protocol
 
 from datamining_skill.application.extraction_strategy import RegexExtractor, vet_pattern
 from datamining_skill.application.orchestrator import MiningProgress, MiningSummary
+from datamining_skill.application.pii_mask import mask_profile, mask_value
 from datamining_skill.application.support import describe_failure
 from datamining_skill.domain.exceptions import DataMiningException, InvalidConfigurationException
+from datamining_skill.infrastructure.audit_log import AuditLog
 from datamining_skill.infrastructure.mcp_jobs import (
     JobAlreadyRunningError,
     MiningJobs,
@@ -40,7 +44,27 @@ TOOL_MINE = "mine_dataset"
 TOOL_STATUS = "mining_status"
 TOOL_CANCEL = "cancel_mining"
 TOOL_PREVIEW = "preview_result"
+TOOL_QUALITY = "check_quality"
 _RESULT_SUFFIXES = (".csv", ".jsonl", ".ndjson")
+
+# result fields that are copied into the audit log: numbers, labels and the job id, never records
+_AUDIT_COUNTS = frozenset(
+    {
+        "records_written",
+        "duplicates_skipped",
+        "chunks_failed",
+        "chunks_total",
+        "oversized_lines",
+        "rows_returned",
+        "has_more",
+        "status",
+        "job_id",
+        "resumed",
+        "already_complete",
+        "pii_masked",
+        "summary",
+    }
+)
 
 MAX_PATH_CHARS = 4096
 MAX_PATTERN_CHARS = 512
@@ -49,6 +73,9 @@ _FIELD_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_ \-]{0,63}")
 
 ProgressFn = Callable[[int, int, str], None]
 ProfileFn = Callable[[Path], dict[str, Any]]
+QualityFn = Callable[[Path, int], dict[str, Any]]
+QUALITY_DEFAULT_RECORDS = 1_000_000
+QUALITY_MAX_RECORDS = 10_000_000
 
 
 class MineRunner(Protocol):
@@ -187,6 +214,35 @@ def _profile_schema() -> dict[str, Any]:
                     "directory; the file must be inside an allowed directory."
                 ),
             }
+        },
+        "required": ["path"],
+        "additionalProperties": False,
+    }
+
+
+def _quality_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "maxLength": MAX_PATH_CHARS,
+                "description": (
+                    "A CSV, TSV or JSON Lines file (also gzip, bzip2, xz or zip compressed, "
+                    "checked on its first 64 MiB). Must be inside an allowed directory."
+                ),
+            },
+            "max_records": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": QUALITY_MAX_RECORDS,
+                "default": QUALITY_DEFAULT_RECORDS,
+                "description": (
+                    "Stop after this many records. The call blocks until the check is done, "
+                    "so keep it modest for a first look; the report says whether the whole "
+                    "file was read."
+                ),
+            },
         },
         "required": ["path"],
         "additionalProperties": False,
@@ -394,13 +450,19 @@ class MiningTools:
         *,
         profile: ProfileFn,
         mine: MineRunner,
+        quality: QualityFn | None = None,
         allow_custom_patterns: bool = False,
+        mask_preview: bool = True,
+        audit: AuditLog | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._policy = policy
         self._profile = profile
         self._mine = mine
+        self._quality = quality
         self._allow_custom_patterns = allow_custom_patterns
+        self._mask = mask_preview
+        self._audit = audit
         self._logger = logger or logging.getLogger(__name__)
         self._jobs = MiningJobs(self._logger)
         self._definitions = (
@@ -499,6 +561,28 @@ class MiningTools:
                     "openWorldHint": False,
                 },
             ),
+            ToolDefinition(
+                name=TOOL_QUALITY,
+                title="Check the quality of a data file",
+                description=(
+                    "Read a CSV, TSV or JSON Lines file once, in constant memory, and report "
+                    "its quality: malformed records by kind with the first line numbers, how "
+                    "complete each field is (empty, null or missing values), the types found in "
+                    "each field and schema drift (a field whose values change type, with the "
+                    "line where the other type first appears). It reports counts and line "
+                    "numbers, never values. Use it after profile_dataset and before mining a "
+                    "file you do not know. It stops after max_records records and says whether "
+                    "it read the whole file."
+                ),
+                input_schema=_quality_schema(),
+                annotations={
+                    "title": "Check the quality of a data file",
+                    "readOnlyHint": True,
+                    "destructiveHint": False,
+                    "idempotentHint": True,
+                    "openWorldHint": False,
+                },
+            ),
         )
 
     def definitions(self) -> list[ToolDefinition]:
@@ -511,8 +595,62 @@ class MiningTools:
         """Validate and run a tool.
 
         Caller mistakes and library errors come back as an error outcome; only an undeclared
-        ``name`` raises ``UnknownToolError``.
+        ``name`` raises ``UnknownToolError``. With an audit log, every call leaves one record.
         """
+        started = time.monotonic()
+        try:
+            outcome = self._dispatch(name, arguments, progress)
+        except UnknownToolError:
+            self._write_audit(name, arguments, ToolOutcome(error="unknown tool"), started)
+            raise
+        self._write_audit(name, arguments, outcome, started)
+        return outcome
+
+    def _write_audit(
+        self, name: str, arguments: Mapping[str, Any], outcome: ToolOutcome, started: float
+    ) -> None:
+        if self._audit is None:
+            return
+        try:
+            self._audit.record(**self._audit_fields(name, arguments, outcome, started))
+        except OSError as exc:  # the call has run; say so in the server log rather than fail it
+            self._logger.error("the audit log could not be written (%s)", describe_failure(exc))
+
+    def _audit_fields(
+        self, name: str, arguments: Mapping[str, Any], outcome: ToolOutcome, started: float
+    ) -> dict[str, Any]:
+        fields: dict[str, Any] = {
+            "event": "tool_call",
+            "tool": name[:64],
+            "ok": not outcome.is_error,
+            "ms": int((time.monotonic() - started) * 1000),
+        }
+        for key in ("path", "output_path"):
+            if key in arguments:
+                try:
+                    fields[key] = self._policy.display(self._policy.resolve(arguments[key], key))
+                except ToolInputError:
+                    fields[key] = "<rejected>"
+        for key in ("unique", "lowercase", "overwrite", "csv_formula_guard", "wait"):
+            if isinstance(arguments.get(key), bool):
+                fields[key] = arguments[key]
+        if "pattern" in arguments:
+            fields["custom_pattern"] = True  # the pattern itself is never recorded
+        for key in ("rows", "max_records"):
+            if isinstance(arguments.get(key), int) and not isinstance(arguments[key], bool):
+                fields[key] = arguments[key]
+        if isinstance(arguments.get("job_id"), str):
+            fields["job_id"] = arguments["job_id"][:64]
+        for key, value in (outcome.data or {}).items():
+            if key in _AUDIT_COUNTS and isinstance(value, int | str | bool | dict):
+                fields[key] = value
+        if outcome.error is not None:
+            fields["error"] = outcome.error[:300]
+        return fields
+
+    def _dispatch(
+        self, name: str, arguments: Mapping[str, Any], progress: ProgressFn | None
+    ) -> ToolOutcome:
         definition = next((d for d in self._definitions if d.name == name), None)
         if definition is None:
             raise UnknownToolError(name)
@@ -526,6 +664,8 @@ class MiningTools:
                 return self._run_cancel(arguments)
             if name == TOOL_PREVIEW:
                 return self._run_preview(arguments)
+            if name == TOOL_QUALITY:
+                return self._run_quality(arguments)
             return self._run_mine(arguments, progress)
         except ToolInputError as exc:
             return ToolOutcome(error=str(exc))
@@ -548,14 +688,27 @@ class MiningTools:
 
     def _run_profile(self, arguments: Mapping[str, Any]) -> ToolOutcome:
         source = self._existing_file(arguments["path"], "path")
-        return ToolOutcome(data=self._profile(source))
+        profile = self._profile(source)
+        return ToolOutcome(data=mask_profile(profile) if self._mask else profile)
+
+    def _run_quality(self, arguments: Mapping[str, Any]) -> ToolOutcome:
+        if self._quality is None:
+            raise ToolInputError("quality checks are not available in this configuration")
+        source = self._existing_file(arguments["path"], "path")
+        report = self._quality(source, arguments.get("max_records", QUALITY_DEFAULT_RECORDS))
+        if not self._mask:
+            return ToolOutcome(data=report)
+        counts: Counter[str] = Counter()
+        masked: dict[str, Any] = mask_value(report, counts)
+        masked["pii_masked"] = dict(sorted(counts.items()))
+        return ToolOutcome(data=masked)
 
     def _run_preview(self, arguments: Mapping[str, Any]) -> ToolOutcome:
         path = self._existing_file(arguments["path"], "path")
         if path.suffix.lower() not in _RESULT_SUFFIXES:
             raise ToolInputError("'path' must be a .csv, .jsonl or .ndjson result file")
         rows = arguments.get("rows", DEFAULT_PREVIEW_ROWS)
-        return ToolOutcome(data=preview_result(path, rows))
+        return ToolOutcome(data=preview_result(path, rows, mask=self._mask))
 
     def _run_status(self, arguments: Mapping[str, Any]) -> ToolOutcome:
         job_id = arguments.get("job_id")

@@ -29,7 +29,7 @@ What to expect:
   details, such as the order of records after a retry.
 - One command turns a messy export into a list of distinct, lower-case addresses. gzip, bzip2, xz
   and single-file zip archives, and Excel's "Unicode Text" (UTF-16) files, are read directly.
-- For assistants there are five MCP tools, a Claude Code plugin and a skill that explains when to
+- For assistants there are six MCP tools, a Claude Code plugin and a skill that explains when to
   use them. File access is limited to the directories you list.
 
 ## Contents
@@ -66,6 +66,9 @@ Inspect a file without reading it into memory, extract a clean address list, che
 # What is in this file? (milliseconds, constant memory)
 datamining-skill profile examples/contacts.csv
 
+# Is the file in good shape? Malformed rows, empty values, type changes (counts and line numbers only)
+datamining-skill quality examples/contacts.csv
+
 # Every distinct e-mail address, lower-cased, one per line (resumable, crash-safe)
 datamining-skill mine examples/contacts.csv emails.csv --unique --lowercase
 
@@ -85,6 +88,16 @@ writes `emails.csv` and prints a JSON summary:
 }
 ```
 
+`quality` reads a CSV, TSV or JSON Lines file once and reports what is wrong with it: records that
+are malformed (a row with too few or too many columns, a broken quote, a line that is not JSON)
+with the first line numbers, how many values of each field are empty or missing, the types found in
+each field, and fields whose values change type (a column of numbers with a few words in it). It
+keeps counts and line numbers, never values, so its memory does not grow with the file. It checks
+up to 1,000,000 records by default (`--max-records`) and says whether it read the whole file. On a
+laptop it takes about 8 seconds for a million CSV rows with six columns, and about 3 seconds for
+half a million JSON Lines records. The file's format is detected first, so a file that is mostly
+broken is refused as "no supported format" before it can be checked.
+
 If `mine` is interrupted, run the same command again: it resumes where it stopped. Run it again
 after it finished and it says `already_complete` instead of doing the work twice. Changing any
 setting (the pattern, `--unique`, ...) starts a new job.
@@ -97,6 +110,7 @@ standard input/output, so an assistant can inspect and mine local files on your 
 | Tool | What it does |
 | --- | --- |
 | `profile_dataset` | Format, encoding, columns or keys, size and estimated record count of a CSV, TSV, JSON, JSONL or log file; also gzip, bzip2, xz and zip files. Read-only. |
+| `check_quality` | Reads a CSV, TSV or JSON Lines file once and reports malformed records (by kind, with line numbers), empty or missing values per field, the value types found and schema drift. Counts and line numbers only, never values. Read-only. |
 | `mine_dataset` | Extracts data (e-mail addresses by default) into a `.csv` or `.jsonl` result in memory-bounded chunks with checkpoints. `unique`, `lowercase`, `csv_formula_guard` and `overwrite` options. With `wait=false` it runs in the background and returns a job id. |
 | `mining_status` | Progress and result of a background run, or a list of the runs of this session. |
 | `cancel_mining` | Stops a background run after its current chunk; calling `mine_dataset` again resumes it. |
@@ -193,6 +207,13 @@ Create `.cursor/mcp.json` in your project (or `~/.cursor/mcp.json` for all proje
   the server with `--allow-custom-patterns` only if you accept that. The built-in e-mail
   extraction is not affected: it uses bounded patterns, and the test suite runs it against hostile
   lines a megabyte long under a time limit.
+- **What the assistant sees is masked.** `preview_result` rows and the column names from
+  `profile_dataset` have e-mail addresses, IPv4 addresses, card numbers, T.C. kimlik numbers and
+  IBANs replaced by tags such as `[EMAIL]`. This is a best-effort safety net, not anonymisation;
+  see [docs/mcp-tools.md](docs/mcp-tools.md#masking-and-the-audit-log). `--unmasked-preview` turns
+  it off.
+- **Keep a record of what it did.** `--audit-log /path/outside/your/data/audit.jsonl` appends one
+  line per tool call with the time, tool, paths and counts, never contents.
 - Verify an installation without a client: `python scripts/mcp_smoke_test.py` performs a full
   handshake, profile and mine against the installed command and exits non-zero on any problem.
 
@@ -206,13 +227,15 @@ untrusted; see [docs/privacy-and-security.md](docs/privacy-and-security.md) for 
 
 ```text
 datamining-skill profile PATH [--config FILE]
+datamining-skill quality PATH [--max-records N] [--workspace DIR] [--mask]
 datamining-skill mine SOURCE OUTPUT [--workspace DIR] [--unique] [--lowercase]
                                     [--pattern REGEX [--fields a,b]] [--overwrite]
                                     [--csv-formula-guard] [--json-escapes {auto,on,off}]
                                     [--max-expanded-gib GIB] [--no-progress]
-datamining-skill preview PATH [--rows N]
+datamining-skill preview PATH [--rows N] [--mask]
 datamining-skill clean [--workspace DIR] [--all] [--dry-run]
 datamining-skill mcp [--allow-dir DIR ...] [--allow-custom-patterns]
+                     [--unmasked-preview] [--audit-log FILE]
 ```
 
 | Option | Meaning |
@@ -227,6 +250,10 @@ datamining-skill mcp [--allow-dir DIR ...] [--allow-custom-patterns]
 | `--no-progress` | Hide the progress line, which appears only when stderr is a terminal. |
 | `--workspace` | Where the `.scratch/` folder with state and scratch files lives (default: the current directory). |
 | `--rows` | How many records `preview` shows (1 to 200, default 20). |
+| `--max-records` | `quality` stops after this many records (default 1,000,000) and says whether it read the whole file. |
+| `--mask` | `preview` and `quality` replace e-mail, IPv4, card, T.C. kimlik and IBAN numbers by tags such as `[EMAIL]`. |
+| `--unmasked-preview` | `mcp` returns preview rows and profile column names as they are. By default they are masked. |
+| `--audit-log` | `mcp` appends one JSON line per tool call (never contents) to this file, which must lie outside the allowed directories. |
 | `--all`, `--dry-run` | `clean` also removes unfinished jobs / only reports what it would remove. |
 
 Every command also accepts `--log-level {DEBUG,INFO,WARNING,ERROR}` (structured JSON logs on

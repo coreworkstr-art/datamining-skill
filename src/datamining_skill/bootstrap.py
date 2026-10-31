@@ -39,6 +39,7 @@ from datamining_skill.domain.ports import (
     StreamReader,
     UniqueKeyStore,
 )
+from datamining_skill.infrastructure.audit_log import AuditLog
 from datamining_skill.infrastructure.boundaries import NewlineBoundaryLocator
 from datamining_skill.infrastructure.encoding import StdlibEncodingDetector
 from datamining_skill.infrastructure.guard import BinaryContentGuard
@@ -60,6 +61,7 @@ from datamining_skill.infrastructure.memory import ProcessMemoryProbe
 from datamining_skill.infrastructure.output_sink import LocalOutputSink
 from datamining_skill.infrastructure.paths import confined_child
 from datamining_skill.infrastructure.permissions import ensure_private_directory
+from datamining_skill.infrastructure.quality_scan import DEFAULT_MAX_RECORDS, scan_quality
 from datamining_skill.infrastructure.scratch import LocalScratchStore
 from datamining_skill.infrastructure.source_prep import (
     DEFAULT_MAX_EXPANDED_BYTES,
@@ -219,6 +221,7 @@ def run_layout(workspace: Path, source: Path, output: Path, settings: str = "") 
 
 _PREPARED_NAME = "source.utf8"
 PROFILE_SAMPLE_BYTES = 4 * 1024 * 1024
+QUALITY_SAMPLE_BYTES = 64 * 1024 * 1024
 
 
 def run_mining(
@@ -413,21 +416,85 @@ def profile_source(
     return result
 
 
+def check_quality(
+    path: str | os.PathLike[str],
+    *,
+    workspace: str | os.PathLike[str] | None = None,
+    max_records: int = DEFAULT_MAX_RECORDS,
+    config: ProfilerConfig | None = None,
+) -> dict[str, Any]:
+    """Check the records of a CSV, TSV or JSON Lines file and report what is wrong with them.
+
+    One pass in constant memory over at most ``max_records`` records: malformed records (by
+    kind, with the first line numbers), how complete each field is, and fields whose values
+    change type. Values are never kept or reported. A compressed file is checked on its first
+    ``QUALITY_SAMPLE_BYTES`` once decompressed, held briefly in the workspace's ``.scratch``.
+    """
+    source = Path(path)
+    stat_regular_file(source)
+    settings = config or ProfilerConfig()
+    profiler = create_profiler(settings)
+    reader = FileStreamReader(settings.chunk_size_bytes, settings.max_line_bytes)
+    with source.open("rb") as handle:
+        compressed = compression_of(handle.read(8)) is not None
+    size = source.stat().st_size
+    if not compressed:
+        report = scan_quality(source, profiler.profile(source), reader, max_records=max_records)
+        report["file"] = {"name": source.name, "size_bytes": size, "size_human": format_size(size)}
+        return report
+
+    root = confined_child(Path(workspace) if workspace is not None else Path.cwd(), ".scratch")
+    ensure_private_directory(root)
+    sample = root / f"quality-{os.urandom(6).hex()}.sample"
+    try:
+        transform = convert_to_utf8(source, sample, sample_bytes=QUALITY_SAMPLE_BYTES)
+        truncated = sample.stat().st_size >= QUALITY_SAMPLE_BYTES
+        try:
+            report = scan_quality(sample, profiler.profile(sample), reader, max_records=max_records)
+        except UnsupportedDataFormatException as exc:
+            raise UnsupportedDataFormatException(source.name, exc.reason) from exc
+    finally:
+        sample.unlink(missing_ok=True)
+    report["file"] = {"name": source.name, "size_bytes": size, "size_human": format_size(size)}
+    report["compression"] = transform
+    if truncated:
+        report["scope"]["complete"] = False
+        report["scope"]["note"] = (
+            f"a compressed source is checked on its first {format_size(QUALITY_SAMPLE_BYTES)} "
+            "once decompressed"
+        )
+    return report
+
+
 def create_mcp_server(
     allowed_dirs: Sequence[Path],
     *,
     allow_custom_patterns: bool = False,
+    mask_preview: bool = True,
+    audit_log: str | os.PathLike[str] | None = None,
     logger: logging.Logger | None = None,
     mine_runner: MineRunner | None = None,
     profile_runner: ProfileFn | None = None,
     max_message_chars: int = DEFAULT_MAX_MESSAGE_CHARS,
 ) -> McpServer:
-    """Build the MCP server exposing ``profile_dataset`` and ``mine_dataset``.
+    """Build the MCP server and its six tools.
 
     Every file argument must stay inside ``allowed_dirs``; the first is the workspace.
-    Caller-supplied regular expressions need ``allow_custom_patterns``.
+    Caller-supplied regular expressions need ``allow_custom_patterns``. Personal data in
+    ``preview_result`` rows and in the column names of ``profile_dataset`` is masked unless
+    ``mask_preview`` is false. ``audit_log`` names a file outside ``allowed_dirs`` that receives
+    one line per tool call.
     """
     policy = WorkspacePolicy(allowed_dirs)
+    audit = AuditLog(audit_log, forbidden_roots=policy.roots) if audit_log is not None else None
+    if audit is not None:
+        audit.record(
+            event="server_started",
+            version=__version__,
+            masking=mask_preview,
+            custom_patterns=allow_custom_patterns,
+            allowed_directories=len(policy.roots),
+        )
     if allow_custom_patterns:
         (logger or logging.getLogger(MINING_LOGGER_NAME)).warning(
             "custom regular expressions are enabled: the MCP client can run patterns of its own "
@@ -437,8 +504,13 @@ def create_mcp_server(
         policy,
         profile=profile_runner
         or (lambda path: profile_source(path, workspace=policy.workspace)),
+        quality=lambda path, max_records: check_quality(
+            path, workspace=policy.workspace, max_records=max_records
+        ),
         mine=mine_runner or run_mining,
         allow_custom_patterns=allow_custom_patterns,
+        mask_preview=mask_preview,
+        audit=audit,
         logger=logger,
     )
     return McpServer(

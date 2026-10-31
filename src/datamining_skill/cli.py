@@ -1,7 +1,7 @@
-"""Command-line interface: ``profile``, ``mine``, ``preview``, ``clean`` and ``mcp`` (see README.md).
+"""Command-line interface: ``profile``, ``quality``, ``mine``, ``preview``, ``clean`` and ``mcp`` (see README.md).
 
-``profile``, ``mine``, ``preview`` and ``clean`` write JSON to stdout and log events to stderr;
-``mcp`` keeps stdout for the protocol alone.
+``profile``, ``quality``, ``mine``, ``preview`` and ``clean`` write JSON to stdout and log events
+to stderr; ``mcp`` keeps stdout for the protocol alone.
 
 Exit status: 0 success, 1 internal error, 2 unsupported format, 3 unavailable source, bad
 configuration, file-system or other library error, 4 mining finished with failed chunks,
@@ -18,6 +18,7 @@ import logging
 import os
 import sys
 import traceback
+from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TextIO
@@ -26,7 +27,8 @@ from datamining_skill._version import __version__
 from datamining_skill.application.config import ProfilerConfig
 from datamining_skill.application.miner_worker import JSON_ESCAPES_MODES
 from datamining_skill.application.orchestrator import MiningProgress
-from datamining_skill.bootstrap import create_mcp_server, profile_source, run_mining
+from datamining_skill.application.pii_mask import mask_value
+from datamining_skill.bootstrap import check_quality, create_mcp_server, profile_source, run_mining
 from datamining_skill.domain.exceptions import (
     DataMiningException,
     InvalidConfigurationException,
@@ -38,6 +40,7 @@ from datamining_skill.infrastructure.config_loader import load_config
 from datamining_skill.infrastructure.logging import configure_json_logging, disable_json_logging
 from datamining_skill.infrastructure.mcp_server import serve_stdio
 from datamining_skill.infrastructure.paths import check_path_text
+from datamining_skill.infrastructure.quality_scan import DEFAULT_MAX_RECORDS, MAX_MAX_RECORDS
 from datamining_skill.infrastructure.result_preview import (
     DEFAULT_PREVIEW_ROWS,
     MAX_PREVIEW_ROWS,
@@ -52,6 +55,7 @@ _RESULT_SUFFIXES = (".csv", ".jsonl", ".ndjson")
 _MAIN_EXAMPLES = """\
 examples:
   datamining-skill profile events.csv
+  datamining-skill quality events.csv
   datamining-skill mine events.csv emails.csv --unique --lowercase
   datamining-skill preview emails.csv
   datamining-skill mcp --allow-dir ~/data
@@ -76,7 +80,9 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    commands = parser.add_subparsers(dest="command", required=True, metavar="{profile,mine,preview,clean,mcp}")
+    commands = parser.add_subparsers(
+        dest="command", required=True, metavar="{profile,quality,mine,preview,clean,mcp}"
+    )
 
     profile = commands.add_parser(
         "profile", help="profile a CSV, JSON, JSONL or log file (also gzip, bzip2, xz, zip)"
@@ -84,6 +90,35 @@ def _build_parser() -> argparse.ArgumentParser:
     profile.add_argument("path", help="file to profile (read-only, never copied)")
     profile.add_argument("--config", help="TOML file with a [profiler] table")
     _add_logging_options(profile, default_level="WARNING")
+
+    quality = commands.add_parser(
+        "quality",
+        help="check a CSV, TSV or JSON Lines file for malformed records, empty values and type drift",
+        description=(
+            "Read a CSV, TSV or JSON Lines file once, in constant memory, and report malformed "
+            "records (by kind, with line numbers), how complete each field is, the value types "
+            "found in each field and schema drift. Only counts and line numbers are reported, "
+            "never values. Stops after --max-records records and says whether it read the whole file."
+        ),
+    )
+    quality.add_argument("path", help="file to check (read-only)")
+    quality.add_argument(
+        "--max-records",
+        type=int,
+        default=DEFAULT_MAX_RECORDS,
+        metavar="N",
+        help=f"stop after N records, 1 to {MAX_MAX_RECORDS:,} (default: {DEFAULT_MAX_RECORDS:,})",
+    )
+    quality.add_argument(
+        "--workspace",
+        help="where a compressed source's temporary sample goes, in .scratch (default: current directory)",
+    )
+    quality.add_argument(
+        "--mask",
+        action="store_true",
+        help="replace e-mail, IPv4, card, T.C. kimlik and IBAN numbers in field names by tags",
+    )
+    _add_logging_options(quality, default_level="WARNING")
 
     mine = commands.add_parser(
         "mine",
@@ -160,6 +195,11 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_PREVIEW_ROWS,
         help=f"records to show, 1 to {MAX_PREVIEW_ROWS} (default: {DEFAULT_PREVIEW_ROWS})",
     )
+    preview.add_argument(
+        "--mask",
+        action="store_true",
+        help="replace e-mail, IPv4, card, T.C. kimlik and IBAN numbers by tags such as [EMAIL]",
+    )
     _add_logging_options(preview, default_level="WARNING")
 
     clean = commands.add_parser(
@@ -185,9 +225,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "mcp",
         help="run the Model Context Protocol server on stdio",
         description=(
-            "Run an MCP server exposing profile_dataset, mine_dataset, mining_status, "
-            "cancel_mining and preview_result over stdio. File arguments are restricted to "
-            "the allowed directories."
+            "Run an MCP server exposing profile_dataset, check_quality, mine_dataset, "
+            "mining_status, cancel_mining and preview_result over stdio. File arguments are "
+            "restricted to the allowed directories."
         ),
     )
     mcp.add_argument(
@@ -204,6 +244,23 @@ def _build_parser() -> argparse.ArgumentParser:
         "--allow-custom-patterns",
         action="store_true",
         help="let tool callers supply regular expressions (off by default: ReDoS risk)",
+    )
+    mcp.add_argument(
+        "--unmasked-preview",
+        action="store_true",
+        help=(
+            "return preview_result rows and profile_dataset column names as they are "
+            "(by default e-mail addresses, IPv4 addresses, card, T.C. kimlik and IBAN numbers "
+            "are replaced by tags before they reach the assistant)"
+        ),
+    )
+    mcp.add_argument(
+        "--audit-log",
+        metavar="FILE",
+        help=(
+            "append one JSON line per tool call (time, tool, paths, counts, never contents) to FILE, "
+            "which must lie outside the allowed directories"
+        ),
     )
     _add_logging_options(mcp, default_level="WARNING")
     return parser
@@ -271,6 +328,19 @@ def _run_profile(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_quality(args: argparse.Namespace) -> int:
+    if not 1 <= args.max_records <= MAX_MAX_RECORDS:
+        raise InvalidConfigurationException(f"--max-records must be between 1 and {MAX_MAX_RECORDS:,}")
+    report = check_quality(args.path, workspace=args.workspace, max_records=args.max_records)
+    if args.mask:
+        counts: Counter[str] = Counter()
+        report = mask_value(report, counts)
+        report["pii_masked"] = dict(sorted(counts.items()))
+    json.dump(report, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return 0
+
+
 def _run_clean(args: argparse.Namespace) -> int:
     workspace = Path(args.workspace) if args.workspace else Path.cwd()
     outcomes = clean_workspace(workspace, include_unfinished=args.all, dry_run=args.dry_run)
@@ -295,7 +365,7 @@ def _run_preview(args: argparse.Namespace) -> int:
         raise InvalidConfigurationException("the result file must end in .csv, .jsonl or .ndjson")
     if not result.is_file():
         raise InvalidConfigurationException("the result path does not name an existing file")
-    json.dump(preview_result(result, args.rows), sys.stdout, indent=2)
+    json.dump(preview_result(result, args.rows, mask=args.mask), sys.stdout, indent=2)
     sys.stdout.write("\n")
     return 0
 
@@ -340,6 +410,10 @@ def _run_mine(args: argparse.Namespace) -> int:
     return 0
 
 
+UNMASKED_PREVIEW_WARNING = (
+    "WARNING: --unmasked-preview sends the rows of preview_result and the column names of "
+    "profile_dataset to the MCP client as they are, personal data included."
+)
 CUSTOM_PATTERN_WARNING = (
     "WARNING: --allow-custom-patterns lets the MCP client run regular expressions of its own "
     "choosing against your files. A crafted pattern can hang this process; only enable this "
@@ -350,8 +424,13 @@ CUSTOM_PATTERN_WARNING = (
 def _run_mcp(args: argparse.Namespace) -> int:
     if args.allow_custom_patterns:
         print(CUSTOM_PATTERN_WARNING, file=sys.stderr)  # stderr: stdout is the protocol channel
+    if args.unmasked_preview:
+        print(UNMASKED_PREVIEW_WARNING, file=sys.stderr)
     server = create_mcp_server(
-        _allowed_dirs(args.allow_dir), allow_custom_patterns=args.allow_custom_patterns
+        _allowed_dirs(args.allow_dir),
+        allow_custom_patterns=args.allow_custom_patterns,
+        mask_preview=not args.unmasked_preview,
+        audit_log=args.audit_log,
     )
     try:
         serve_stdio(server)
@@ -409,6 +488,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     handlers = {
         "profile": _run_profile,
+        "quality": _run_quality,
         "mine": _run_mine,
         "preview": _run_preview,
         "clean": _run_clean,

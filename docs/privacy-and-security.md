@@ -61,7 +61,8 @@ the person who started it.
 | Oversized or malformed messages | Messages are read in bounded pieces (1 MiB limit) and rejected without losing synchronisation; JSON that is too deep is rejected as a parse error. |
 | Over-broad workspace | With no `--allow-dir` and no `DATAMINING_SKILL_ALLOWED_DIRS`, the server uses its working directory and refuses to start if that is the filesystem root. |
 | Corrupting the protocol channel | stdout carries only JSON-RPC messages; `print` is redirected to stderr while serving. |
-| Leaking information in results | Tool results contain names, counts, workspace-relative paths and (for `profile_dataset`) column names or JSON keys. Mined records go only to the output file; they are never returned to the client or logged. |
+| Leaking information in results | Tool results contain names, counts, workspace-relative paths and (for `profile_dataset` and `check_quality`) column names or JSON keys; `check_quality` otherwise reports only counts and line numbers, never a value. Mined records go to the output file and are never logged; the only way they reach the client is `preview_result` (at most 256 KiB), whose rows, like the column names of `profile_dataset`, have e-mail, IPv4, card, T.C. kimlik and IBAN numbers replaced by tags unless the operator starts the server with `--unmasked-preview`. See "Masking" below. |
+| No trace of what the assistant did | `--audit-log FILE` appends one JSON line per tool call (time, tool, paths, counts, never contents). The file must lie outside the allowed directories, so the assistant can neither read nor overwrite it. See "Audit log" below. |
 
 Residual risks:
 
@@ -128,6 +129,33 @@ protected ACL itself, using the Windows security API through `ctypes`. Tests rea
 ACL back from the operating system and assert that no broad trustee (Everyone, Users,
 Authenticated Users, Interactive, Network, ...) is present. Applying an ACL is best-effort: on a
 file system without ACLs (FAT) the call fails quietly and the object keeps whatever it inherited.
+
+### Masking
+
+`application/pii_mask.py` replaces e-mail addresses, IPv4 addresses, payment card numbers (Luhn),
+Turkish national identity numbers (both check digits) and IBANs (mod 97) with tags before a
+preview or profile reaches the assistant. Checksums keep ordinary numbers from being hidden.
+Verified by tests with valid and invalid numbers, overlapping candidates and hostile
+megabyte-long lines.
+
+What masking is not: it does not recognise names, postal addresses, phone numbers, IPv6
+addresses or anything written in free text, it leaves a number with a mistyped digit alone, and
+it does not touch the result file or the source. Describe it as a safety net that lowers the
+chance of personal data reaching a model, never as anonymisation or as compliance with the
+GDPR or the KVKK. An operator who needs the rows unchanged starts the server with
+`--unmasked-preview`; a warning is printed, and the assistant cannot change the setting.
+
+### Audit log
+
+`--audit-log FILE` writes one JSON line per tool call: time, tool, success, duration,
+workspace-relative paths, switches, result counts and the error text of a failed call. Contents,
+rows, patterns and arguments are never recorded. The file is created owner-only, opened with
+append semantics and never through a symbolic link, and it must lie outside the allowed
+directories (the server refuses to start otherwise): inside them, `preview_result` could read it
+and `mine_dataset` could overwrite it. A record that cannot be written is reported in the server
+log; the call that caused it is not undone. The log is plain text and not tamper-proof against
+someone who already has the operator's file permissions; ship it to a protected store if you
+need that.
 
 ### Terminal safety
 

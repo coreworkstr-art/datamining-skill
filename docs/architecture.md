@@ -586,6 +586,7 @@ and adds no data-processing logic of its own.
                             │
                             ▼
               profile_dataset ─▶ profile_source(...)
+              check_quality ───▶ check_quality(...)  ─▶ scan_quality + QualityAccumulator
               mine_dataset ────▶ run_mining(...)  ─▶ StateManager + MiningOrchestrator
                   │ wait=false          (in the foreground, or on a MiningJobs thread)
                   ▼
@@ -596,11 +597,31 @@ and adds no data-processing logic of its own.
 | Module | Responsibility |
 | --- | --- |
 | `infrastructure/mcp_server.py` | Standard-library JSON-RPC 2.0 over newline-delimited stdio; protocol lifecycle; error codes; progress notifications. |
-| `infrastructure/mcp_tools.py` | The five tool declarations (JSON Schema + behaviour annotations), argument validation, and `WorkspacePolicy` path confinement. Runners are injected, so it depends on neither the CLI nor the composition root. |
+| `infrastructure/mcp_tools.py` | The six tool declarations (JSON Schema + behaviour annotations), argument validation, and `WorkspacePolicy` path confinement. Runners are injected, so it depends on neither the CLI nor the composition root. |
 | `infrastructure/mcp_jobs.py` | `MiningJobs`: background runs on daemon threads, their progress, results and cancellation. |
-| `infrastructure/result_preview.py` | The bounded look at the start of a result file. |
-| `bootstrap.py` | `run_mining` (state/scratch layout, resume, overwrite, conversion, finished-job answer), `profile_source` and `create_mcp_server`; shared by the CLI and the MCP tools. |
-| `cli.py` | `profile`, `mine`, `preview`, `clean` and `mcp` commands; exit codes; allowed-directory resolution; the progress line. |
+| `infrastructure/result_preview.py` | The bounded look at the start of a result file, optionally masked. |
+| `infrastructure/audit_log.py` | `AuditLog`: the append-only record of tool calls, outside the allowed directories. |
+| `application/pii_mask.py` | Best-effort masking of e-mail, IPv4, card, T.C. kimlik and IBAN numbers in what the assistant is shown. |
+| `application/data_quality.py`, `infrastructure/quality_scan.py` | The `check_quality` statistics and the single pass over a CSV or JSON Lines file that feeds them. |
+| `bootstrap.py` | `run_mining` (state/scratch layout, resume, overwrite, conversion, finished-job answer), `profile_source`, `check_quality` and `create_mcp_server`; shared by the CLI and the MCP tools. |
+| `cli.py` | `profile`, `quality`, `mine`, `preview`, `clean` and `mcp` commands; exit codes; allowed-directory resolution; the progress line. |
+
+### Data quality
+
+`check_quality` answers "what is wrong with this file" in one pass and constant memory, without
+mining it. The profiler runs first, for the format, the encoding, the delimiter and the header
+(so a file too damaged to be recognised is refused before it can be checked). `FileStreamReader`
+then yields decoded lines from the byte after the byte-order mark; a line over the 1 MiB cap is
+flagged and counted, never parsed. CSV goes through the standard `csv` module in strict mode,
+so a broken quote is an error and not silently accepted; JSON Lines through `json.loads`.
+
+`QualityAccumulator` keeps, per field (at most 512), one counter per value type and the first
+line each type appeared on, plus counters for malformed kinds and the first five example lines.
+It stores no value, so the report cannot leak data and memory does not grow with the file.
+A malformed CSV row is left out of the field statistics because its cells cannot be matched to
+columns. A compressed source is checked through the same temporary sample as `profile`, 64 MiB
+instead of 4. The statistics are about the records read: with `max_records` the report says that
+it stopped.
 
 ### Protocol: one server, two eras
 

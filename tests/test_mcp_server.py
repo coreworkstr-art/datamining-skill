@@ -199,7 +199,7 @@ def test_tools_list_declares_every_tool_with_valid_schemas(client: Client) -> No
     result = response["result"]
     assert "resultType" not in result and "ttlMs" not in result  # modern-only fields
     tools = {tool["name"]: tool for tool in result["tools"]}
-    assert list(tools) == ["profile_dataset", "mine_dataset", "mining_status", "cancel_mining", "preview_result"]  # deterministic order
+    assert list(tools) == ["profile_dataset", "mine_dataset", "mining_status", "cancel_mining", "preview_result", "check_quality"]  # deterministic order
     for tool in tools.values():
         schema = tool["inputSchema"]
         assert schema["type"] == "object" and schema["additionalProperties"] is False
@@ -246,7 +246,7 @@ def test_modern_requests_need_no_handshake_and_carry_result_type(client: Client)
     assert result["resultType"] == "complete"
     assert result["ttlMs"] > 0 and result["cacheScope"] in ("public", "private")
     assert result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"] == "datamining-skill"
-    assert [t["name"] for t in result["tools"]] == ["profile_dataset", "mine_dataset", "mining_status", "cancel_mining", "preview_result"]
+    assert [t["name"] for t in result["tools"]] == ["profile_dataset", "mine_dataset", "mining_status", "cancel_mining", "preview_result", "check_quality"]
 
 
 def test_server_discover_reports_versions_and_capabilities(client: Client) -> None:
@@ -840,7 +840,7 @@ def test_cli_mcp_runs_a_full_session_over_real_pipes(state_dir: Path) -> None:
     assert all(m["jsonrpc"] == "2.0" for m in messages)
     by_id = {m["id"]: m for m in messages if "id" in m}
     assert by_id[1]["result"]["serverInfo"]["name"] == "datamining-skill"
-    assert len(by_id[2]["result"]["tools"]) == 5
+    assert len(by_id[2]["result"]["tools"]) == 6
     assert by_id[3]["result"]["structuredContent"]["records"]["count"] == 2000
     assert by_id[4]["result"]["structuredContent"]["records_written"] == 2000
     assert any(m.get("method") == "notifications/progress" for m in messages)

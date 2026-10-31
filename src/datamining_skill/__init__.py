@@ -26,6 +26,7 @@ from datamining_skill.application.orchestrator import (
 from datamining_skill.application.record_formats import CsvFormatter, JsonlFormatter
 from datamining_skill.application.result_aggregator import ResultAggregator
 from datamining_skill.bootstrap import (
+    check_quality,
     create_chunking_engine,
     create_mcp_server,
     create_orchestrator,
@@ -92,6 +93,7 @@ __all__ = [
     "StateStoreException",
     "UnsupportedDataFormatException",
     "__version__",
+    "check_quality",
     "create_chunking_engine",
     "create_mcp_server",
     "create_orchestrator",

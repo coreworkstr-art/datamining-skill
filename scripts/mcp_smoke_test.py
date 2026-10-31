@@ -28,7 +28,7 @@ MODERN_META = {
     "io.modelcontextprotocol/protocolVersion": "2026-07-28",
     "io.modelcontextprotocol/clientCapabilities": {},
 }
-TOOLS = ["profile_dataset", "mine_dataset", "mining_status", "cancel_mining", "preview_result"]
+TOOLS = ["profile_dataset", "mine_dataset", "mining_status", "cancel_mining", "preview_result", "check_quality"]
 
 
 def fail(message: str) -> None:
@@ -136,6 +136,12 @@ def main() -> int:
         profile = session.call("profile_dataset", {"path": "contacts.csv"})
         expect(profile["structuredContent"]["records"]["count"] == 500, "profile_dataset")
 
+        quality = session.call("check_quality", {"path": "contacts.csv"})["structuredContent"]
+        expect(
+            quality["summary"]["records_valid"] == 500 and quality["scope"]["complete"] is True,
+            "check_quality reads every record",
+        )
+
         mined = session.call(
             "mine_dataset",
             {"path": "contacts.csv", "output_path": "found.csv"},
@@ -147,7 +153,11 @@ def main() -> int:
         expect(found == ["email", *emails], "result file is exact")
 
         preview = session.call("preview_result", {"path": "found.csv", "rows": 3})["structuredContent"]
-        expect(preview["columns"] == ["email"] and preview["rows"][0] == [emails[0]] and preview["has_more"], "preview_result")
+        expect(
+            preview["columns"] == ["email"] and preview["rows"][0] == ["[EMAIL]"] and preview["has_more"],
+            "preview_result (rows masked by default)",
+        )
+        expect(preview["pii_masked"] == {"EMAIL": 3}, "preview_result counts the masked values")
 
         distinct = session.call(
             "mine_dataset", {"path": "repeats.csv", "output_path": "distinct.csv", "unique": True, "lowercase": True}

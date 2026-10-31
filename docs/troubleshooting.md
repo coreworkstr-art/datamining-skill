@@ -30,7 +30,8 @@ symbolic links are resolved. Relative paths start at the first allowed directory
 
 | Message | What it means and what to do |
 | --- | --- |
-| `Unsupported data format ... content matches no supported format` | The head of the file looks like no supported format. The message lists the confidence per format. Check that the file is text and not a database export or an Excel workbook (`.xlsx` is a zip of XML files: export it to CSV first). |
+| `Unsupported data format ... content matches no supported format` | The head of the file looks like no supported format. The message lists the confidence per format. Check that the file is text and not a database export or an Excel workbook (`.xlsx` is a zip of XML files: export it to CSV first). A file in which most rows are damaged is refused the same way, because the format is detected before anything is checked; look at its first lines, or cut a good sample out of it, and run `quality` on that. |
+| `... quality checks cover CSV, TSV and JSON Lines files` | `quality` was given a log or a single JSON document. Use `profile` for those. |
 | `... binary content (NUL bytes ...)` | The file is not text. |
 | `... gzip-compressed content; decompress or convert it ...` | Only appears for formats that cannot be converted (zstandard, 7-zip, Parquet, PDF, ...). gzip, bzip2, xz and single-file zip are handled for you. |
 | `... zip archive with N files` | Extract the one file you want to mine first. |
@@ -68,6 +69,25 @@ appended after the others. No record is lost or repeated.
 
 **A spreadsheet shows odd values.** If mined text starts with `=`, `+`, `-` or `@`, a spreadsheet
 may treat it as a formula. Mine with `--csv-formula-guard`.
+
+## Reading a quality report
+
+**`quality` says the encoding is a guess.** The file is not valid UTF-8, and the detector fell
+back to cp1252 or ISO-8859-1, which decode every byte. A UTF-8 file with a few corrupt bytes ends
+up here, and its accented or Turkish letters are then read wrongly. Find the bad bytes and
+re-save the file as UTF-8.
+
+**A field is reported as drifting but looks fine.** Drift means the field holds more than one
+kind of value: numbers, words, dates, booleans. A column of identifiers such as `00123`, `A-17`
+and `4567` is numbers and words at once, and so is a JSON field that is sometimes `5` and
+sometimes `"5"`. `first_seen_line` shows where the second kind starts.
+
+**The counts are lower than the number of lines.** `records` counts records, not lines: a quoted
+CSV value that spans lines is one record, blank lines are listed apart, and a malformed row is
+counted under `malformed` and left out of the field statistics.
+
+**`complete` is false.** The check stopped at `--max-records` (raise it), or the source is
+compressed and only its first 64 MiB were read.
 
 ## Speed
 

@@ -100,9 +100,10 @@ def _job_size(root: Path, stem: str) -> int:
 
 def _remove_old_samples(root: Path) -> None:
     """Delete profile samples a crashed process left behind; recent ones may still be in use."""
-    for sample in root.glob("profile-*.sample*"):
-        try:
-            if time.time() - sample.stat().st_mtime > _SAMPLE_MAX_AGE_SECONDS:
-                sample.unlink(missing_ok=True)
-        except OSError:
-            continue
+    for pattern in ("profile-*.sample*", "quality-*.sample*"):
+        for sample in root.glob(pattern):
+            try:
+                if time.time() - sample.stat().st_mtime > _SAMPLE_MAX_AGE_SECONDS:
+                    sample.unlink(missing_ok=True)
+            except OSError:
+                continue

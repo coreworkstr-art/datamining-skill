@@ -240,7 +240,8 @@ def test_the_full_flow_over_the_protocol_with_the_real_miner(state_dir: Path) ->
 
     assert status["status"] == "succeeded" and status["result"]["records_written"] == 10
     preview = call(4, "preview_result", {"path": "out.csv", "rows": 3})["structuredContent"]
-    assert preview["columns"] == ["email"] and preview["rows"][0] == ["emp0@internal.corp.test"] and preview["has_more"] is True
+    assert preview["columns"] == ["email"] and preview["rows"][0] == ["[EMAIL]"] and preview["has_more"] is True
+    assert preview["pii_masked"] == {"EMAIL": 3}
 
 
 @pytest.mark.parametrize(
@@ -271,4 +272,4 @@ def test_preview_returns_a_json_lines_result(state_dir: Path) -> None:
 
     outcome = tools.call("preview_result", {"path": "r.jsonl", "rows": 1})
 
-    assert outcome.data is not None and outcome.data["rows"] == [{"email": "a@b.test"}] and outcome.data["has_more"] is True
+    assert outcome.data is not None and outcome.data["rows"] == [{"email": "[EMAIL]"}] and outcome.data["has_more"] is True

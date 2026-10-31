@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import csv
 import json
+from collections import Counter
 from pathlib import Path
 from typing import Any
+
+from datamining_skill.application.pii_mask import mask_value
 
 DEFAULT_PREVIEW_ROWS = 20
 MAX_PREVIEW_ROWS = 200
@@ -30,14 +33,25 @@ def _is_shallow(value: Any) -> bool:
     return True
 
 
-def preview_result(path: Path, rows: int = DEFAULT_PREVIEW_ROWS) -> dict[str, Any]:
+def preview_result(path: Path, rows: int = DEFAULT_PREVIEW_ROWS, *, mask: bool = False) -> dict[str, Any]:
     """The first ``rows`` records of a ``.csv``, ``.jsonl`` or ``.ndjson`` result file.
 
     Reads at most 256 KiB, so any file size is safe. CSV rows come back as lists below
     ``columns``, JSON Lines records as objects. ``has_more`` says whether the file holds
-    more than was returned.
+    more than was returned. With ``mask`` every recognised piece of personal data is replaced
+    by a tag (``application/pii_mask.py``) and ``pii_masked`` tells how many of each.
     """
-    rows = max(1, min(rows, MAX_PREVIEW_ROWS))
+    result = _read_preview(path, max(1, min(rows, MAX_PREVIEW_ROWS)))
+    if mask:
+        counts: Counter[str] = Counter()
+        for key in ("columns", "rows"):
+            if key in result:
+                result[key] = mask_value(result[key], counts)
+        result["pii_masked"] = dict(sorted(counts.items()))
+    return result
+
+
+def _read_preview(path: Path, rows: int) -> dict[str, Any]:
     size = path.stat().st_size
     with path.open("rb") as handle:
         head = handle.read(_PREVIEW_BYTES)

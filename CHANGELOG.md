@@ -6,6 +6,34 @@ All notable changes are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`quality` command and `check_quality` tool.** One pass over a CSV, TSV or JSON Lines file, in
+  constant memory, reporting malformed records (too few or too many columns, a broken quote, a line
+  that is not JSON or not an object, a line over 1 MiB) by kind with the first line numbers, how many
+  values of each field are empty, null or missing, the value types found in each field, and schema
+  drift: a field whose values change type, with the line where the other type first appears. It also
+  says when the encoding is only a guess because the file is not valid UTF-8. Counts and line
+  numbers only, never values. It stops after `--max-records` records (default 1,000,000) and says
+  whether it read the whole file; a compressed source is checked on its first 64 MiB. About 8 MiB/s
+  on a dense CSV and 15 MiB/s on JSON Lines.
+- **Masking of what the assistant sees.** `preview_result` rows and the field names in
+  `profile_dataset` and `check_quality` have e-mail addresses, IPv4 addresses, payment card numbers
+  (Luhn), Turkish national identity numbers (check digits) and IBANs (mod 97) replaced by tags such as
+  `[EMAIL]`, with `pii_masked` counting them. It is best effort and not anonymisation. The result file
+  is never changed. `datamining-skill preview --mask` and `quality --mask` do the same on the command
+  line; `mcp --unmasked-preview` turns it off for the server and prints a warning.
+- **Audit log.** `datamining-skill mcp --audit-log FILE` appends one JSON line per tool call (time,
+  tool, success, duration, workspace-relative paths, switches, result counts, error text; never
+  contents, patterns or rows). The file must lie outside the allowed directories so that the assistant
+  can neither read nor overwrite it.
+
+### Changed
+
+- **`preview_result` and the field names of `profile_dataset` are masked by default** (see above). A
+  client that compared the returned rows with the mined values now sees tags instead; start the server
+  with `--unmasked-preview` to get the old behaviour.
+
 ## [0.2.0] - 2026-10-08
 
 ### Added
