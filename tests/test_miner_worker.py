@@ -359,7 +359,10 @@ def test_worker_memory_is_constant_regardless_of_chunk_size(
             tracemalloc.stop()
 
         assert result.records_written > 300_000
-        assert peak < 1 * MIB, f"processing a {size / MIB:.0f} MiB chunk allocated {peak / MIB:.2f} MiB"
+        # The real peak is about 1 MiB on every platform and interpreter measured (0.998 MiB on
+        # Windows, a hair over 1 on Linux and macOS with Python 3.14), so a 1 MiB limit failed by
+        # rounding. A reader that did not stream would allocate the whole 16 MiB, eight times this.
+        assert peak < 2 * MIB, f"processing a {size / MIB:.0f} MiB chunk allocated {peak / MIB:.2f} MiB"
     finally:
         path.unlink(missing_ok=True)
 
