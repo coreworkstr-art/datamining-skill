@@ -1,6 +1,6 @@
 # Security policy
 
-Fixes go into the latest minor release, which for now is the 0.2 series.
+Fixes go into the latest minor release, which for now is the 0.3 series.
 
 ## Reporting a problem
 

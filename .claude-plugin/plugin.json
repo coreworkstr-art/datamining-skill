@@ -1,7 +1,7 @@
 {
   "name": "datamining-skill",
   "displayName": "DataMining Skill",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Extract data, such as e-mail addresses, from very large CSV, JSON, JSON Lines and log files on your own machine: profile a file, mine it into a result and check the result. An interrupted run resumes where it stopped.",
   "author": {
     "name": "DataMining Skill Contributors"

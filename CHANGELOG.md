@@ -6,6 +6,8 @@ All notable changes are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-01
+
 ### Added
 
 - **`quality` command and `check_quality` tool.** One pass over a CSV, TSV or JSON Lines file, in
