@@ -1,15 +1,16 @@
 # DataMining Skill
 
-A command-line tool, Python library and MCP server that pulls data out of very large text files
-(CSV, TSV, JSON, JSON Lines and logs) on an ordinary computer. It reads a file in pieces, so the
-memory it needs depends on its settings and not on the size of the file, and it keeps checkpoints,
-so a run that was interrupted can be started again and carries on where it stopped.
+DataMining Skill pulls data out of very large text files (CSV, TSV, JSON, JSON Lines and logs) on an
+ordinary computer. It is a command-line tool, a Python library and an MCP server in one.
 
-It was written for one job in particular: getting a clean list of e-mail addresses out of a large
-export or log. You can also give it your own regular expression. You can run it from a terminal,
-call it from Python, or let an AI assistant that speaks the
-[Model Context Protocol](https://modelcontextprotocol.io) (Claude Code, Claude Desktop, Cursor and
-others) use it through the included MCP server and skill.
+The file is read in pieces, so memory use follows the settings and not the size of the file.
+Progress is saved as it goes: if a run is interrupted, the same command carries on from the last
+checkpoint.
+
+It was written for one job: getting a clean list of e-mail addresses out of a big export or log.
+You can also give it a regular expression of your own. Use it from a terminal, call it from Python,
+or point an assistant that speaks the [Model Context Protocol](https://modelcontextprotocol.io)
+(Claude Code, Claude Desktop, Cursor and others) at the MCP server and the skill that come with it.
 
 [![CI](https://github.com/coreworkstr-art/datamining-skill/actions/workflows/ci.yml/badge.svg)](https://github.com/coreworkstr-art/datamining-skill/actions/workflows/ci.yml)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
@@ -18,26 +19,26 @@ others) use it through the included MCP server and skill.
 ![Type checked: mypy strict](https://img.shields.io/badge/mypy-strict-blue)
 ![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)
 
-What to expect:
+A few things worth knowing before you start:
 
-- Everything runs on your machine. The program has no network code, no telemetry and no
-  third-party packages, and it never sends your data anywhere.
-- Every buffer has a fixed upper size, so memory use follows the configuration and not the file.
-  The test suite checks this, and the [Performance](#performance) figures include a 10 GiB file.
-- If a run is killed or the power goes, running the same command again finishes the job with the
-  same records an uninterrupted run would have written. [Limitations](#limitations) lists the
-  details, such as the order of records after a retry.
-- One command turns a messy export into a list of distinct, lower-case addresses. gzip, bzip2, xz
-  and single-file zip archives, and Excel's "Unicode Text" (UTF-16) files, are read directly.
-- For assistants there are six MCP tools, a Claude Code plugin and a skill that explains when to
-  use them. File access is limited to the directories you list.
+- Everything stays on your machine. There is no network code, no telemetry and no third-party
+  package, and your data is never sent anywhere.
+- Memory use is set by the configuration, not by the file. The tests check it, and the
+  [Performance](#performance) figures include a 10 GiB file.
+- If a run is killed or the power goes, running the same command again gives the same records an
+  uninterrupted run would have. [Limitations](#limitations) has the details, such as the order of
+  records after a retry.
+- gzip, bzip2, xz and single-file zip archives are read directly, and so are Excel's "Unicode Text"
+  (UTF-16) files. One command turns a messy export into a list of distinct, lower-case addresses.
+- For assistants there are six MCP tools, a Claude Code plugin and a skill that says when to use
+  them. File access is limited to the directories you list.
 
 ## Contents
 
-[Install](#install) · [Quick start](#quick-start) · [Use it from an AI assistant](#use-it-from-an-ai-assistant) ·
-[Command line](#command-line) · [Recipes](#recipes) · [Python API](#python-api) ·
-[How it works](#how-it-works) · [Performance](#performance) · [Guarantees](#guarantees) ·
-[Limitations](#limitations) · [Troubleshooting](#troubleshooting) · [Development](#development) ·
+[Install](#install) | [Quick start](#quick-start) | [Use it from an AI assistant](#use-it-from-an-ai-assistant) |
+[Command line](#command-line) | [Recipes](#recipes) | [Python API](#python-api) |
+[How it works](#how-it-works) | [Performance](#performance) | [Guarantees](#guarantees) |
+[Limitations](#limitations) | [Troubleshooting](#troubleshooting) | [Development](#development) |
 [Contributing](#contributing)
 
 ## Install
@@ -190,31 +191,30 @@ Create `.cursor/mcp.json` in your project (or `~/.cursor/mcp.json` for all proje
 
 ### Configuration notes
 
-- **Use the full path to the command if it is not on the client's `PATH`**, for example when
-  you installed into a virtual environment. Either point at the console script
-  (`/path/to/.venv/bin/datamining-skill`, or `...\.venv\Scripts\datamining-skill.exe` on
-  Windows) or at the interpreter: `"command": "/path/to/.venv/bin/python", "args":
-  ["-m", "datamining_skill", "mcp", "--allow-dir", "..."]`.
-- **Windows paths in JSON need doubled backslashes** (`"C:\\Users\\you\\data"`); forward slashes
-  also work.
-- You can list several `--allow-dir` options, or set `DATAMINING_SKILL_ALLOWED_DIRS` (paths
-  separated by `;` on Windows, `:` elsewhere). With neither, the server uses its working
-  directory, and refuses to if that is the filesystem root.
-- Results, state and scratch files go to `<first allowed dir>/.scratch/` and the result path you
+- If the client can't find the command, give it the full path. This happens when you installed into
+  a virtual environment. Point at the console script (`/path/to/.venv/bin/datamining-skill`, or
+  `...\.venv\Scripts\datamining-skill.exe` on Windows) or at the interpreter:
+  `"command": "/path/to/.venv/bin/python", "args": ["-m", "datamining_skill", "mcp", "--allow-dir", "..."]`.
+- In a JSON file, Windows paths need doubled backslashes (`"C:\\Users\\you\\data"`). Forward slashes
+  work too.
+- You can repeat `--allow-dir`, or set `DATAMINING_SKILL_ALLOWED_DIRS` (paths separated by `;` on
+  Windows, `:` elsewhere). With neither, the server uses its working directory, and refuses to if
+  that is the filesystem root.
+- Results, state and scratch files go to `<first allowed dir>/.scratch/` and to the result path you
   name. Add `.scratch/` to your `.gitignore`.
-- **Custom patterns** (`pattern` and `fields` arguments) are off by default: a model-written
-  regular expression can be crafted to backtrack catastrophically and stall your machine. Start
-  the server with `--allow-custom-patterns` only if you accept that. The built-in e-mail
-  extraction is not affected: it uses bounded patterns, and the test suite runs it against hostile
-  lines a megabyte long under a time limit.
-- **What the assistant sees is masked.** `preview_result` rows and the column names from
-  `profile_dataset` have e-mail addresses, IPv4 addresses, card numbers, T.C. kimlik numbers and
-  IBANs replaced by tags such as `[EMAIL]`. This is a best-effort safety net, not anonymisation;
-  see [docs/mcp-tools.md](docs/mcp-tools.md#masking-and-the-audit-log). `--unmasked-preview` turns
-  it off.
-- **Keep a record of what it did.** `--audit-log /path/outside/your/data/audit.jsonl` appends one
-  line per tool call with the time, tool, paths and counts, never contents.
-- Verify an installation without a client: `python scripts/mcp_smoke_test.py` performs a full
+- Custom patterns (the `pattern` and `fields` arguments) are off by default. A regular expression
+  written by a model can be made to backtrack until your machine stalls, so start the server with
+  `--allow-custom-patterns` only if you accept that. The built-in e-mail extraction is not
+  affected: it uses bounded patterns, and the test suite runs it against hostile lines a megabyte
+  long under a time limit.
+- What the assistant sees is masked. In `preview_result` rows and in the column names from
+  `profile_dataset`, e-mail addresses, IPv4 addresses, card numbers, T.C. kimlik numbers and IBANs
+  become tags such as `[EMAIL]`. It is a best-effort safety net, not anonymisation (see
+  [docs/mcp-tools.md](docs/mcp-tools.md#masking-and-the-audit-log)), and `--unmasked-preview`
+  turns it off.
+- To keep a record of what the assistant did, pass `--audit-log /path/outside/your/data/audit.jsonl`.
+  It gets one line per tool call with the time, the tool, paths and counts, and never any contents.
+- To test an installation without a client, run `python scripts/mcp_smoke_test.py`. It does a full
   handshake, profile and mine against the installed command and exits non-zero on any problem.
 
 The server is written against the standard library only and speaks both generations of MCP: the
@@ -455,8 +455,8 @@ bound by the interpreter. Mining is single-threaded. See
 - A match longer than 4 KiB that lies inside a line longer than 1 MiB can be cut in two.
 - The MCP server handles one request at a time; use `wait=false` for long runs. It cannot interrupt
   a running call, but you can stop the process safely at any moment and resume later.
-- Power loss can lose the most recent checkpoints (never corrupt data), so a few chunks may be mined
-  again; this is why extraction must be idempotent, which it is by construction.
+- A power cut can lose the most recent checkpoints, though it never corrupts data, so a few chunks
+  may be mined again. That is harmless because extraction is idempotent.
 
 ## Troubleshooting
 
@@ -496,7 +496,7 @@ src/datamining_skill/
   infrastructure/   streaming, encoding, source conversion, SQLite state, scratch/output stores,
                     background jobs, MCP server, logging
   bootstrap.py      composition root (run_mining, profile_source, create_mcp_server, ...)
-  cli.py            command line: profile, mine, preview, clean, mcp
+  cli.py            command line: profile, quality, mine, preview, clean, mcp
 .claude-plugin/     Claude Code plugin and marketplace manifests
 skills/datamining/  the skill that teaches an assistant to use the tools
 tests/              pytest suite          scripts/    validation and release scripts
@@ -506,9 +506,9 @@ examples/           a small sample file to try the commands on
 
 ## Contributing
 
-Contributions are welcome under any name or pseudonym. Please read
-[CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md). Report security
-issues privately as described in [SECURITY.md](SECURITY.md). Changes are recorded in
+You are welcome to contribute under any name or pseudonym. [CONTRIBUTING.md](CONTRIBUTING.md) says how
+and the [Code of Conduct](CODE_OF_CONDUCT.md) says how we treat each other. Report security problems
+privately, as [SECURITY.md](SECURITY.md) describes. What changed in each version is in
 [CHANGELOG.md](CHANGELOG.md).
 
 ## Using it responsibly
