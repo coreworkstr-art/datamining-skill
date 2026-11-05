@@ -2,4 +2,5 @@
 # CI matrix includes Windows runners that would otherwise check out CRLF).
 * text=auto eol=lf
 *.png binary
+*.webp binary
 *.gz binary

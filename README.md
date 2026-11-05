@@ -19,6 +19,8 @@ or point an assistant that speaks the [Model Context Protocol](https://modelcont
 ![Type checked: mypy strict](https://img.shields.io/badge/mypy-strict-blue)
 ![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)
 
+![Diagram: a huge file of logs, CSV or JSON goes in, is read in 512 MiB chunks with constant memory and checkpoints, and a clean emails.csv comes out with each address once. Everything stays on your machine.](docs/images/overview.webp)
+
 A few things worth knowing before you start:
 
 - Everything stays on your machine. There is no network code, no telemetry and no third-party
