@@ -767,9 +767,15 @@ def test_sql_text_is_never_assembled_from_strings() -> None:
             for side in (node.left, node.right):
                 if isinstance(side, ast.Constant) and isinstance(side.value, str) and SQL_WORDS.search(side.value):
                     offenders.append(f"concatenation/percent at line {node.lineno}")
-        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "format":
-            if isinstance(node.func.value, ast.Constant) and isinstance(node.func.value.value, str) and SQL_WORDS.search(node.func.value.value):
-                offenders.append(f".format at line {node.lineno}")
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "format"
+            and isinstance(node.func.value, ast.Constant)
+            and isinstance(node.func.value.value, str)
+            and SQL_WORDS.search(node.func.value.value)
+        ):
+            offenders.append(f".format at line {node.lineno}")
     assert offenders == []
 
 
