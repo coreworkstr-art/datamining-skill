@@ -516,13 +516,18 @@ def test_vetting_many_distinct_repeats_stays_fast() -> None:
 
 
 def test_an_overlapping_alternation_really_is_exponential() -> None:
-    """Why the check exists: the cost of (a|aa)+ on a near-miss doubles with every added letter."""
+    """Why the check exists: the cost of (a|aa)+ on a near-miss grows by about 1.6 times with every added letter."""
+
     def cost(letters: int) -> float:
         started = time.perf_counter()
         re.match(r"(a|aa)+$", "a" * letters + "!")
         return time.perf_counter() - started
 
-    assert cost(30) > 3 * cost(26)  # four more letters: about 7 times as long
+    # A busy machine can only make a measurement longer. So the short run, which takes a few
+    # milliseconds, is repeated and its shortest time used, while the long run, which takes about a
+    # tenth of a second, can only gain from a pause.
+    short = min(cost(22) for _ in range(5))
+    assert cost(30) > 3 * short  # eight more letters: about 47 times as long
 
 
 def test_the_catastrophic_shape_really_is_catastrophic() -> None:
