@@ -150,6 +150,7 @@ class P2QuantileEstimator:
             parabolic = q[i] + step * (q[i + step] - q[i]) / (n[i + step] - n[i])
         q[i] = parabolic
         n[i] += step
+
     def value(self) -> float | None:
         """The estimate; None before any value, and exact (nearest rank) while there are fewer than five."""
         if self.count == 0:
@@ -159,32 +160,48 @@ class P2QuantileEstimator:
             return ordered[min(len(ordered) - 1, int(self._p * len(ordered)))]
         return self._heights[2]
 
+    def marker_values(self) -> tuple[float, float, float] | None:
+        """The three interior markers: estimates of the quantiles p/2, p and (1 + p)/2.
+
+        For p = 0.5 these are the quartiles and the median, from one estimator. None before any
+        value; while there are fewer than five, the nearest-rank values of those three quantiles.
+        """
+        if self.count == 0:
+            return None
+        if not self._heights:
+            ordered = sorted(self._start)
+            last = len(ordered) - 1
+            fractions = (self._p / 2.0, self._p, (1.0 + self._p) / 2.0)
+            low, middle, high = (ordered[min(last, int(f * len(ordered)))] for f in fractions)
+            return low, middle, high
+        return self._heights[1], self._heights[2], self._heights[3]
+
 
 class QuantileSummary:
-    """The quartiles of a stream: three P² estimators.
+    """The quartiles of a stream, from one P² estimator.
 
-    P² is exact only in the limit and is known to be less accurate on a stream that is sorted or
-    drifts steadily; the answer is an estimate either way.
+    The five markers of P² for p = 0.5 sit at the minimum, the 25th percentile, the median, the
+    75th percentile and the maximum, and are all kept up to date, so one estimator answers for the
+    three quantiles at a third of the cost. P² is exact only in the limit and is known to be less
+    accurate on a stream that is sorted or drifts steadily; the answer is an estimate either way.
     """
 
-    __slots__ = ("_q25", "_q50", "_q75")
+    __slots__ = ("_estimator",)
 
     def __init__(self) -> None:
-        self._q25 = P2QuantileEstimator(0.25)
-        self._q50 = P2QuantileEstimator(0.50)
-        self._q75 = P2QuantileEstimator(0.75)
+        self._estimator = P2QuantileEstimator(0.5)
 
     def update(self, x: float) -> None:
         if math.isnan(x) or math.isinf(x):
             return
-        self._q25.push(x)
-        self._q50.push(x)
-        self._q75.push(x)
+        self._estimator.push(x)
+
     def to_dict(self) -> dict[str, float]:
         """``p25``, ``median``, ``p75`` and ``iqr`` (estimates); empty before any value."""
-        low, middle, high = self._q25.value(), self._q50.value(), self._q75.value()
-        if low is None or middle is None or high is None:
+        markers = self._estimator.marker_values()
+        if markers is None:
             return {}
+        low, middle, high = markers
         return {
             "p25": round(low, 4),
             "median": round(middle, 4),

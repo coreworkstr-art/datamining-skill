@@ -193,7 +193,8 @@ class QualityAccumulator:
         self.valid += 1
         tracked = min(expected, MAX_TRACKED_FIELDS)
         for index in range(tracked):
-            self._fields[self._columns[index]].add(classify_text(row[index]), line, row[index])
+            cell = row[index].strip()  # stripped once: the type and the distinct count both ignore the margins
+            self._fields[self._columns[index]].add(classify_text(cell), line, cell)
         self.untracked_values += expected - tracked
 
     def add_object(self, line: int, record: Mapping[str, Any]) -> None:

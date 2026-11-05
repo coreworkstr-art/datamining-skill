@@ -719,3 +719,25 @@ def test_the_exact_smallest_and_largest_values_are_never_reported(state_dir: Pat
 
     assert set(stats) == {"mean", "stddev", "skewness", "excess_kurtosis", "p25", "median", "p75", "iqr"}
     assert "987654.321" not in json.dumps(report)
+
+
+def test_one_estimator_answers_for_all_three_quartiles() -> None:
+    rng = random.Random(21)
+    values = [rng.expovariate(0.1) for _ in range(5000)]
+    single = P2QuantileEstimator(0.5)
+    dedicated = [P2QuantileEstimator(p) for p in (0.25, 0.5, 0.75)]
+    for value in values:
+        single.push(value)
+        for estimator in dedicated:
+            estimator.push(value)
+
+    markers = single.marker_values()
+
+    assert markers is not None
+    for marker, estimator in zip(markers, dedicated, strict=True):
+        assert marker == pytest.approx(estimator.value(), rel=0.03)
+    assert P2QuantileEstimator(0.5).marker_values() is None
+    few = P2QuantileEstimator(0.5)
+    for value in (3.0, 1.0, 2.0):
+        few.update(value)
+    assert few.marker_values() == (1.0, 2.0, 3.0)
