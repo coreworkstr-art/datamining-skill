@@ -7,6 +7,7 @@ neither the payload nor any absolute path, before any file is read or written.
 from __future__ import annotations
 
 import ast
+import errno
 import json
 import logging
 import os
@@ -16,6 +17,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import threading
 import time
 import tomllib
 from collections.abc import Iterator
@@ -38,9 +40,11 @@ from datamining_skill import (
 )
 from datamining_skill.application.extraction_strategy import EMAIL_PATTERN, vet_pattern
 from datamining_skill.cli import CUSTOM_PATTERN_WARNING, main
-from datamining_skill.domain.exceptions import printable
+from datamining_skill.domain.exceptions import OutputIntegrityException, printable
+from datamining_skill.infrastructure import output_sink
 from datamining_skill.infrastructure.handlers.log_handler import _MATCH_PREFIX_CHARS, _PATTERNS
 from datamining_skill.infrastructure.mcp_tools import ToolInputError, WorkspacePolicy
+from datamining_skill.infrastructure.output_sink import LocalOutputSink
 from datamining_skill.infrastructure.paths import check_path_text
 from datamining_skill.infrastructure.permissions import ensure_private_directory, restrict_to_owner
 from datamining_skill.infrastructure.scratch import LocalScratchStore
@@ -49,6 +53,7 @@ from tests.support import describe_dacl, make_directory_link, remove_link
 from tests.test_mcp_server import INITIALIZED, LEGACY_INIT, MODERN_META, Client, call, request, tool_text
 
 ON_WINDOWS = os.name == "nt"
+HAS_FIFO = hasattr(os, "mkfifo")
 windows_only = pytest.mark.skipif(not ON_WINDOWS, reason="Windows path semantics")
 posix_only = pytest.mark.skipif(ON_WINDOWS, reason="POSIX permission bits")
 SRC = Path(__file__).resolve().parent.parent / "src" / "datamining_skill"
@@ -151,6 +156,68 @@ def test_control_characters_rejected_before_any_fs_access(
 
     with pytest.raises(ToolInputError, match="control characters"):
         env.policy.resolve(name, "path")
+
+
+HIDDEN_CHARACTERS = [
+    pytest.param("\x9b31m.csv", id="c1-8bit-csi"),
+    pytest.param("a\x85b.csv", id="c1-next-line"),
+    pytest.param("a\x80b.csv", id="c1-first"),
+    pytest.param("a\x9fb.csv", id="c1-last"),
+    pytest.param("evil‮csv.txt", id="bidi-right-to-left-override"),
+    pytest.param("a‪b.csv", id="bidi-embedding"),
+    pytest.param("a⁦b⁩.csv", id="bidi-isolates"),
+    pytest.param("zero​width.csv", id="zero-width-space"),
+    pytest.param("a⁠b.csv", id="word-joiner"),
+    pytest.param("﻿bom.csv", id="byte-order-mark"),
+    pytest.param("a­b.csv", id="soft-hyphen"),
+    pytest.param("lone\ud800.csv", id="lone-surrogate"),
+    pytest.param("ab.csv", id="private-use"),
+]
+
+
+@pytest.mark.parametrize("name", HIDDEN_CHARACTERS)
+def test_c1_controls_and_invisible_format_characters_are_rejected_before_any_fs_access(
+    env: Env, name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def touched(*_args: object, **_kwargs: object) -> Path:
+        raise AssertionError("the filesystem was consulted before the path text was vetted")
+
+    monkeypatch.setattr(Path, "resolve", touched)
+
+    with pytest.raises(ToolInputError, match="control characters"):
+        env.policy.resolve(name, "path")
+    with pytest.raises(InvalidConfigurationException, match="control characters") as caught:
+        check_path_text(name, "'path'")
+    assert name not in str(caught.value)  # the message names the category, never the text
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["müşteri.csv", "名前.csv", "файл.csv", "αβγ.csv", "\uff41\uff42\uff43.csv", "emoji \U0001f600.csv", "\u00f1\u0303.csv", "data-2026.csv"],
+)
+def test_ordinary_non_ascii_names_are_still_accepted(name: str) -> None:
+    check_path_text(name, "'path'")  # letters, marks, symbols and digits of any script
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param("\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645.csv", id="persian-zero-width-non-joiner"),
+        pytest.param("\u0634\u0631\u06a9\u062a\u200c\u0647\u0627.csv", id="persian-plural-ending"),
+        pytest.param("\u0c15\u0ccd\u200d\u0cb7.csv", id="kannada-zero-width-joiner"),
+        pytest.param("\u0915\u094d\u200d\u0937.csv", id="devanagari-zero-width-joiner"),
+        pytest.param("\U0001f468\u200d\U0001f469\u200d\U0001f467.csv", id="emoji-family-sequence"),
+    ],
+)
+def test_the_joiners_that_real_names_need_are_accepted(name: str, env: Env) -> None:
+    check_path_text(name, "'path'")
+    assert env.policy.resolve(name, "path").name == name
+
+
+@pytest.mark.parametrize("name", ["a\u200eb.csv", "a\u200fb.csv", "a\u200cb\u202e.csv", "\u200d\u200b.csv"])
+def test_other_format_characters_stay_refused_even_next_to_a_joiner(name: str) -> None:
+    with pytest.raises(InvalidConfigurationException, match="control characters"):
+        check_path_text(name, "'path'")  # the exception covers the two joiners and nothing else
 
 
 @pytest.mark.parametrize("name", ["ok.csv/..namedfork/rsrc", "OK.CSV/..NAMEDFORK/rsrc"])
@@ -803,3 +870,238 @@ def test_hostile_file_name_cannot_rewrite_the_terminal(
 
     err = capsys.readouterr().err
     assert code == 2 and "\u202e" not in err and "\\u202e" in err
+
+
+# ============================================ the result file cannot be redirected or swapped
+
+
+PAYROLL_BYTES = b"id,token\n1,confidential\n"
+
+
+@pytest.fixture
+def sink_rig(state_dir: Path) -> tuple[LocalOutputSink, Path, Path]:
+    """A sink with a result file that already holds ``email`` and one row, and a file outside it."""
+    outside = state_dir / "outside"
+    outside.mkdir()
+    payroll = outside / "payroll.csv"
+    payroll.write_bytes(PAYROLL_BYTES)
+    sink = LocalOutputSink(state_dir / "out.csv")
+    part = state_dir / "part.tmp"
+    part.write_bytes(b"row1\n")
+    sink.reset(b"email\n")
+    sink.append_from(part)
+    return sink, payroll, part
+
+
+def run_operation(sink: LocalOutputSink, operation: str, part: Path) -> None:
+    if operation == "truncate":
+        sink.truncate(3)
+    elif operation == "append_from":
+        sink.append_from(part)
+    else:
+        sink.reset(b"x\n")
+
+
+def swap_for_symlink(sink: LocalOutputSink, target: Path) -> None:
+    sink.path.unlink()
+    try:
+        sink.path.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symbolic links are not available to this user")
+
+
+@pytest.mark.parametrize("operation", ["truncate", "append_from"])
+def test_a_symlink_swapped_in_after_the_start_is_never_written_through(
+    sink_rig: tuple[LocalOutputSink, Path, Path], operation: str
+) -> None:
+    sink, payroll, part = sink_rig
+    swap_for_symlink(sink, payroll)
+
+    with pytest.raises(OutputIntegrityException, match="symbolic link"):
+        run_operation(sink, operation, part)
+
+    assert payroll.read_bytes() == PAYROLL_BYTES  # not cut, not appended to
+
+
+def test_a_symlink_swapped_in_before_reset_is_refused_as_a_configuration_error(
+    state_dir: Path, sink_rig: tuple[LocalOutputSink, Path, Path]
+) -> None:
+    _, payroll, _ = sink_rig
+    fresh = LocalOutputSink(state_dir / "fresh.csv")
+    fresh.path.write_bytes(b"")
+    swap_for_symlink(fresh, payroll)
+
+    with pytest.raises(InvalidConfigurationException, match="symbolic link"):
+        fresh.reset(b"email\n")
+
+    assert payroll.read_bytes() == PAYROLL_BYTES  # reset would have truncated it
+
+
+def test_a_symlink_swapped_in_after_reset_is_refused_as_an_integrity_error(
+    sink_rig: tuple[LocalOutputSink, Path, Path],
+) -> None:
+    sink, payroll, _ = sink_rig
+    swap_for_symlink(sink, payroll)
+
+    with pytest.raises(OutputIntegrityException, match="symbolic link"):
+        sink.reset(b"email\n")
+
+    assert payroll.read_bytes() == PAYROLL_BYTES
+
+
+@pytest.mark.parametrize("operation", ["truncate", "append_from", "reset"])
+def test_a_link_is_caught_by_the_pre_check_on_every_platform(
+    sink_rig: tuple[LocalOutputSink, Path, Path], operation: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sink, _, part = sink_rig
+    before = sink.path.read_bytes()
+    real = Path.is_symlink
+    monkeypatch.setattr(Path, "is_symlink", lambda self: self == sink.path or real(self))  # stands in for a link
+
+    with pytest.raises(OutputIntegrityException, match="symbolic link"):
+        run_operation(sink, operation, part)
+
+    monkeypatch.undo()
+    assert sink.path.read_bytes() == before
+
+
+def test_a_symlink_that_wins_the_race_at_open_time_is_translated_cleanly(
+    sink_rig: tuple[LocalOutputSink, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """O_NOFOLLOW reports a link as ELOOP (EMLINK on some systems): that must not leak as a raw OSError."""
+    sink, _, part = sink_rig
+    real_open = os.open
+
+    def refuse(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        if Path(path) == sink.path:
+            raise OSError(errno.ELOOP, "Too many levels of symbolic links")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", refuse)
+
+    with pytest.raises(OutputIntegrityException, match="symbolic link") as caught:
+        sink.append_from(part)
+
+    assert str(sink.path) not in str(caught.value)
+
+
+def test_the_output_flags_forbid_following_links_wherever_the_system_can() -> None:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    for flags in (output_sink._CREATE_FLAGS, output_sink._RDWR_FLAGS, output_sink._APPEND_FLAGS):
+        assert flags & nofollow == nofollow
+    assert not output_sink._RDWR_FLAGS & os.O_TRUNC  # truncate must not empty the file by opening it
+    assert not output_sink._APPEND_FLAGS & os.O_CREAT  # append must not create a file that went missing
+
+
+@pytest.mark.parametrize("operation", ["truncate", "append_from"])
+def test_a_different_file_swapped_in_between_operations_is_detected_and_left_alone(
+    state_dir: Path, sink_rig: tuple[LocalOutputSink, Path, Path], operation: str
+) -> None:
+    sink, _, part = sink_rig
+    impostor = state_dir / "impostor.csv"
+    impostor.write_bytes(b"email\nrow1\nrow2\nrow3\n")
+    os.replace(impostor, sink.path)  # a new file, and so a new identity, under the same name
+
+    with pytest.raises(OutputIntegrityException, match="replaced while mining"):
+        sink.truncate(6) if operation == "truncate" else sink.append_from(part)
+
+    assert sink.path.read_bytes() == b"email\nrow1\nrow2\nrow3\n"  # the impostor was not touched
+
+
+def test_a_reset_starts_a_new_identity_and_normal_work_goes_on(
+    sink_rig: tuple[LocalOutputSink, Path, Path],
+) -> None:
+    sink, _, part = sink_rig
+    sink.path.unlink()  # the file is gone, and a deliberate restart creates a new one
+
+    sink.reset(b"email\n")  # replaces the remembered identity instead of tripping over it
+    assert sink.append_from(part) == 11
+    sink.truncate(6)
+
+    assert sink.path.read_bytes() == b"email\n"
+
+
+def test_a_sink_that_has_never_opened_the_file_accepts_the_one_it_finds(state_dir: Path) -> None:
+    sink = LocalOutputSink(state_dir / "resumed.csv")
+    sink.path.write_bytes(b"email\nrow1\nrow2\n")  # left by an earlier, interrupted process
+
+    sink.truncate(11)  # the first operation of a resumed run records the identity
+
+    assert sink.path.read_bytes() == b"email\nrow1\n"
+
+
+def test_a_file_that_is_not_a_regular_file_is_refused(
+    sink_rig: tuple[LocalOutputSink, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sink, _, part = sink_rig
+    real_fstat = os.fstat
+
+    def as_fifo(descriptor: int) -> os.stat_result:
+        real = real_fstat(descriptor)
+        fields: Any = (stat.S_IFIFO | 0o600, *tuple(real)[1:10])
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(os, "fstat", as_fifo)
+
+    with pytest.raises(OutputIntegrityException, match="not a regular file"):
+        sink.append_from(part)
+
+
+def test_a_failed_check_does_not_leak_the_descriptor(
+    sink_rig: tuple[LocalOutputSink, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sink, _, part = sink_rig
+    opened: list[int] = []
+    closed: list[int] = []
+    real_open, real_close = os.open, os.close
+
+    def spy_open(path: Any, flags: int, *args: Any, **kwargs: Any) -> int:
+        descriptor = real_open(path, flags, *args, **kwargs)
+        if Path(path) == sink.path:
+            opened.append(descriptor)
+        return descriptor
+
+    def spy_close(descriptor: int) -> None:
+        closed.append(descriptor)
+        real_close(descriptor)
+
+    sink._identity = (0, 1)  # not the identity of the file on disk
+    monkeypatch.setattr(os, "open", spy_open)
+    monkeypatch.setattr(os, "close", spy_close)
+
+    with pytest.raises(OutputIntegrityException, match="replaced while mining"):
+        sink.append_from(part)
+
+    assert opened and set(opened) <= set(closed)
+
+
+@pytest.mark.skipif(not HAS_FIFO, reason="named pipes need POSIX")
+@pytest.mark.parametrize("operation", ["reset", "truncate", "append_from"])
+def test_a_named_pipe_in_place_of_the_result_is_refused_without_blocking(
+    state_dir: Path, operation: str
+) -> None:
+    pipe = state_dir / "result.csv"
+    getattr(os, "mkfifo", lambda _path: pytest.skip("named pipes need POSIX"))(pipe)
+    part = state_dir / "part.tmp"
+    part.write_bytes(b"row\n")
+    sink = LocalOutputSink(pipe)
+    outcome: list[BaseException | None] = []
+
+    def attempt() -> None:
+        try:
+            run_operation(sink, operation, part)
+            outcome.append(None)
+        except BaseException as exc:  # the test reports whatever happened
+            outcome.append(exc)
+
+    worker = threading.Thread(target=attempt, daemon=True)
+    worker.start()
+    worker.join(timeout=5)
+    if worker.is_alive():  # unblock the stuck open so that the thread can finish
+        reader = os.open(pipe, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+        worker.join(timeout=5)
+        os.close(reader)
+        pytest.fail("opening a named pipe blocked")
+
+    assert len(outcome) == 1 and isinstance(outcome[0], OutputIntegrityException)
+    assert "not a regular file" in str(outcome[0])

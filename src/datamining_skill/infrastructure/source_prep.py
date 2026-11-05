@@ -15,6 +15,7 @@ import gzip
 import lzma
 import os
 import shutil
+import struct
 import zipfile
 import zlib
 from collections.abc import Iterator
@@ -56,6 +57,18 @@ _WIDE_BOMS = (
     (codecs.BOM_UTF16_BE, "utf-16-be"),
 )
 _READ_ERRORS = (OSError, EOFError, zlib.error, lzma.LZMAError, zipfile.BadZipFile)
+
+# the zip records that describe the central directory, as laid out at the end of an archive
+_EOCD = struct.Struct("<4sHHHHIIH")  # end of central directory: 22 bytes, then a comment
+_ZIP64_LOCATOR = struct.Struct("<4sIQI")  # 20 bytes, immediately before the end record
+_ZIP64_EOCD = struct.Struct("<4sQHHIIQQQQ")  # 56 bytes, immediately before the locator
+_EOCD_SIGNATURE = b"PK\x05\x06"
+_ZIP64_LOCATOR_SIGNATURE = b"PK\x06\x07"
+_ZIP64_EOCD_SIGNATURE = b"PK\x06\x06"
+_MAX_ZIP_COMMENT = 0xFFFF
+_ZIP_TAIL_BYTES = _MAX_ZIP_COMMENT + _EOCD.size + _ZIP64_LOCATOR.size + _ZIP64_EOCD.size
+_MAX_ZIP_ENTRIES = 16  # one file plus a few folder entries; the exact check follows in _open_stream
+_MAX_ZIP_DIRECTORY_BYTES = 64 * 1024
 
 
 def compression_of(head: bytes) -> str | None:
@@ -146,6 +159,44 @@ def convert_to_utf8(
     return "+".join(steps) if steps else None
 
 
+def _vet_zip_central_directory(
+    source: Path, max_entries: int = _MAX_ZIP_ENTRIES, max_cd_bytes: int = _MAX_ZIP_DIRECTORY_BYTES
+) -> None:
+    """Refuse an archive whose central directory is large, before ``zipfile`` reads it.
+
+    ``zipfile.ZipFile`` reads the whole central directory into memory and builds an object for
+    every entry, so an archive that lists millions of files, or announces a multi-gigabyte
+    directory, exhausts memory before any "exactly one file" check can run. This reads only the
+    end of the file (a fixed number of bytes), takes the number of entries and the directory
+    size from the end record (from the ZIP64 records when the archive has them) and refuses
+    anything beyond ``max_entries`` or ``max_cd_bytes``: constant memory whatever the archive
+    claims. It looks at the same record ``zipfile`` will use, the last end-record signature,
+    and does not insist that the comment length matches, because ``zipfile`` does not either
+    and a stricter rule would let a crafted archive steer this check onto another record.
+    A file without an end record is left for ``zipfile`` to report as damaged.
+    """
+    with source.open("rb") as handle:
+        size = handle.seek(0, os.SEEK_END)
+        handle.seek(max(0, size - _ZIP_TAIL_BYTES))
+        tail = handle.read(_ZIP_TAIL_BYTES)
+    end = tail.rfind(_EOCD_SIGNATURE)
+    if end < 0 or end + _EOCD.size > len(tail):
+        return
+    _, _, _, _, entries, directory_bytes, _, _ = _EOCD.unpack_from(tail, end)
+    locator = end - _ZIP64_LOCATOR.size
+    record = locator - _ZIP64_EOCD.size
+    if record >= 0 and tail[locator : locator + 4] == _ZIP64_LOCATOR_SIGNATURE:
+        fields = _ZIP64_EOCD.unpack_from(tail, record)
+        if fields[0] == _ZIP64_EOCD_SIGNATURE:  # zipfile prefers these over the 16 and 32 bit fields
+            entries, directory_bytes = fields[7], fields[8]
+    # a field holding its maximum (0xFFFF, 0xFFFFFFFF) announces ZIP64 values; without the
+    # ZIP64 records it is simply a huge claim, which the limits below refuse as well
+    if entries > max_entries or directory_bytes > max_cd_bytes:
+        raise UnsupportedDataFormatException(
+            source.name, "zip archive has too many entries; extract the file to mine first"
+        )
+
+
 def _require_free_space(directory: Path) -> None:
     free = shutil.disk_usage(directory).free
     if free < _MIN_FREE_BYTES:
@@ -181,6 +232,7 @@ def _open_stream(source: Path, compression: str | None) -> Iterator[IO[bytes]]:
             with lzma.open(source, "rb") as stream:
                 yield stream
         else:
+            _vet_zip_central_directory(source)
             with zipfile.ZipFile(source) as archive:
                 members = [item for item in archive.infolist() if not item.is_dir()]
                 if len(members) != 1:

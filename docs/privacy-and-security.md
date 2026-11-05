@@ -51,11 +51,11 @@ the person who started it.
 | Reading files outside the intended area (`../`, absolute paths, symlinks) | `WorkspacePolicy` resolves each path (following `..` and symlinks) and requires it to lie strictly inside an `--allow-dir` directory. Relative paths resolve against the workspace. Error text names allowed directories but never echoes resolved paths or contents. |
 | UNC and device paths (`\\host\share`, `\\?\`, `\\.\`) | Rejected from the path *text*, before any filesystem call. Resolving a UNC path makes Windows open an SMB connection (and offer the user's NTLM credentials), so a containment check performed after `resolve()` would already have contacted a remote machine. |
 | Names Windows silently rewrites: alternate data streams (`file.csv:hidden`, `::$DATA`), reserved devices (`NUL`, `CON.txt`, `COM1`), trailing dots or spaces | Rejected on Windows from the path text. |
-| Control characters, `%00`, `~`, `$HOME` | Control characters are rejected everywhere (log and terminal forgery). `%00`, `%2e%2e`, `~` and environment references are never decoded or expanded: they are ordinary file-name characters. |
+| Control characters, `%00`, `~`, `$HOME` | Control characters are rejected everywhere (log and terminal forgery), and so are the C1 controls (`\x80` to `\x9f`, including the 8-bit CSI `\x9b`), invisible format characters (the bidirectional overrides and isolates, zero-width spaces, the byte-order mark, which make a name read as another one), surrogates and private-use characters, all before any filesystem access. The check goes by Unicode category (`Cc`, `Cf`, `Cs`, `Co`), so ordinary names in any script are accepted. The zero-width non-joiner and joiner (U+200C, U+200D), which Persian, Arabic and Indic names and emoji sequences need, are allowed explicitly; every other format character is refused. A name that differs from another only by such a joiner can look the same, so a file name is never used to make a decision. `%00`, `%2e%2e`, `~` and environment references are never decoded or expanded: they are ordinary file-name characters. |
 | Planted `.scratch` symlink or junction | `run_layout` refuses a `.scratch` that resolves outside the workspace; otherwise state and chunk files, which contain mined data, could be redirected anywhere. |
-| Overwriting arbitrary files through `output_path` | Output must end in `.csv`, `.jsonl` or `.ndjson` and be inside an allowed directory; an existing result is never replaced unless `overwrite` is true; the output may not be the source file. |
+| Overwriting arbitrary files through `output_path` | Output must end in `.csv`, `.jsonl` or `.ndjson` and be inside an allowed directory; an existing result is never replaced unless `overwrite` is true; the output may not be the source file. Every open of the result file refuses a symbolic link (checked beforehand everywhere and, on POSIX, by `O_NOFOLLOW` at the moment of opening), accepts only a regular file (a named pipe or device is refused without blocking), and compares the file's identity (device and inode) with the one seen when the run began, so a link or another file swapped in between two chunks is detected and left untouched. |
 | Denial of service through a model-written regular expression | `pattern`/`fields` are not even declared unless the operator starts the server with `--allow-custom-patterns`, which prints a warning to stderr at startup. Even then, patterns that repeat a repeating group without an upper bound (`(a+)+`, `(a{1,64})+`) are rejected. This filter is defence in depth, not a guarantee: `re` has no time limit and overlapping alternations such as `(a\|aa)+` are not detected. |
-| A decompression bomb (`bomb.csv.gz`) | A compressed source is expanded as a stream into a private file in `.scratch/`, never into memory. The expansion is capped (`--max-expanded-gib`, default 64 GiB) and stops when less than 1 GiB of disk is free; the partial copy is deleted. A zip archive must hold exactly one unencrypted file, and its member name is never used as a path. The copy is created with `O_NOFOLLOW` and a symbolic link planted in the place of its temporary file is refused, so a conversion cannot be made to overwrite another file. |
+| A decompression bomb (`bomb.csv.gz`) | A compressed source is expanded as a stream into a private file in `.scratch/`, never into memory. The expansion is capped (`--max-expanded-gib`, default 64 GiB) and stops when less than 1 GiB of disk is free; the partial copy is deleted. A zip archive must hold exactly one unencrypted file, and its member name is never used as a path. Before `zipfile` is allowed to read the central directory (which it loads into memory entry by entry), the end of the file is read, a fixed number of bytes, and an archive that announces more than 16 entries or a directory over 64 KiB, in the plain or the ZIP64 records, is refused, so a million-entry archive cannot exhaust memory. The copy is created with `O_NOFOLLOW` and a symbolic link planted in the place of its temporary file is refused, so a conversion cannot be made to overwrite another file. |
 | Reading a result file through `preview_result` | Only `.csv`, `.jsonl` and `.ndjson` regular files inside the allowed directories, and at most 256 KiB are read, whatever the file's size. Over-deep JSON and oversized CSV values cannot make it fail. The rows are file content that reaches the model, so the skill instructs the assistant to treat them as data and never as instructions. |
 | Exhausting the machine with background jobs | At most four run at once; an identical job cannot be started twice; they use the same bounded-memory pipeline and the same per-job lock as a foreground run. |
 | Oversized or malformed messages | Messages are read in bounded pieces (1 MiB limit) and rejected without losing synchronisation; JSON that is too deep is rejected as a parse error. |
@@ -78,9 +78,9 @@ Residual risks:
   the result file (it is owner-only and removed when the job finishes).
 - A converted copy of a compressed or UTF-16 source holds the whole text while a job is unfinished.
   If a run is abandoned, `datamining-skill clean --all` removes it.
-- Opening a zip archive reads its list of entries into memory. An archive from an untrusted source
-  that lists millions of entries needs memory in proportion before the "exactly one file" check can
-  refuse it. Mine archives you trust, or extract the file first.
+- A zip archive with a few folder entries is accepted, and its central directory (at most 64 KiB)
+  is read in memory. One that lists more than 16 entries is refused even if only one of them is a
+  file; extract that file first.
 
 ## Security controls and how they are verified
 
@@ -166,7 +166,10 @@ override could rewrite the user's terminal, so messages escape every non-printab
 ### Residual risks
 
 - **Time-of-check / time-of-use.** Paths are validated, then opened. A local process that can already
-  write inside the allowed directories could swap a file for a link in between.
+  write inside the allowed directories could swap a file for a link in between. The result file and
+  the conversion copy are guarded at the moment of opening (`O_NOFOLLOW`, a file-type check and, for
+  the result file, an identity check), but Windows has no `O_NOFOLLOW`: there the check beforehand and
+  the identity check narrow the window and do not close it. Files that are only read are not guarded.
 - **Hard links** cannot be told apart from ordinary files by path, so a hard link inside the
   workspace to a file outside it is not detected.
 - **Administrators and SYSTEM** retain access on Windows (as they do to any user profile), and root

@@ -6,6 +6,24 @@ All notable changes are recorded here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- **The result file can no longer be redirected or swapped.** Every open of it refuses a symbolic
+  link (beforehand on every platform and, on POSIX, through `O_NOFOLLOW` when opening), accepts only
+  a regular file (a named pipe fails at once instead of blocking) and compares the file's identity
+  with the one seen when the run began, so a link or another file put in its place between two chunks
+  is refused and left untouched instead of being truncated or appended to.
+- **Path text rejects more.** C1 control characters (including the 8-bit CSI `\x9b`), invisible
+  format characters such as the bidirectional overrides, zero-width spaces and the byte-order mark,
+  surrogates and private-use characters are refused before any filesystem access. The zero-width
+  non-joiner and joiner (U+200C, U+200D), which Persian, Arabic and Indic names and emoji sequences
+  need, stay allowed.
+- **A zip archive that lists many entries is refused before it is read.** Opening one made
+  `zipfile` load the whole central directory, so an archive listing millions of files exhausted memory
+  before the "exactly one file" check. The end of the file is now read first, in constant memory, and
+  an archive announcing more than 16 entries or a directory over 64 KiB (also through the ZIP64
+  records) is refused with a plain message.
+
 ## [0.3.0] - 2026-11-01
 
 ### Added

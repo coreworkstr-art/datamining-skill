@@ -430,7 +430,10 @@ occurrence" means first in processing order, which is file order unless a failed
 Mining finds records by byte range, which needs one byte per character and a plain file.
 `infrastructure/source_prep.py` therefore converts a gzip, bzip2, xz or single-file zip source,
 and UTF-16/32 text, to a UTF-8 copy in the job's private scratch folder (`source.utf8`), as a stream
-in constant memory; a compressed UTF-16 file goes through both steps. The conversion stops at an
+in constant memory; a compressed UTF-16 file goes through both steps. A zip archive's central
+directory is vetted first (`_vet_zip_central_directory` reads the last bytes of the file and refuses
+more than 16 entries or 64 KiB, ZIP64 records included) because `zipfile` would load all of it. The
+conversion stops at an
 expansion limit (default 64 GiB) and when free disk space falls below 1 GiB, and never leaves a
 partial copy. The copy is reused if the job is resumed and the source's fingerprint is unchanged,
 and deleted when the job finishes. A repeated call for a finished job is answered from the state
