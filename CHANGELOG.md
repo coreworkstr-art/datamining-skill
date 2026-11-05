@@ -6,6 +6,8 @@ All notable changes are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-05
+
 ### Security
 
 - **Masking now covers IPv6 addresses and secrets.** IPv6 addresses (full, with `::`, with an IPv4
