@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import re
 from collections.abc import Iterable, Iterator, Sequence
 from typing import Protocol
@@ -126,9 +127,9 @@ def _repeats(pattern: str, index: int) -> bool:
 def reject_repeated_capture(pattern: str) -> None:
     """Raise ``InvalidConfigurationException`` for a repeated group that captures.
 
-    ``(\\d+\\.){3}`` keeps only the last repetition ("0." for "10.0.0.0"), so the output would
-    silently hold fragments, and so would ``(?:(\\d+)\\.)+``, whose capture sits inside a
-    repeated group. The fix is a non-capturing group: ``(?:\\d+\\.){3}``.
+    ``(\\d{1,3}\\.){3}`` keeps only the last repetition ("0." for "10.0.0.0"), so the output
+    would silently hold fragments, and so would ``(?:(\\d{1,3})\\.)+``, whose capture sits inside
+    a repeated group. The fix is a non-capturing group: ``(?:\\d{1,3}\\.){3}``.
     """
     # per open group: does it capture, and does it contain a capturing group?
     open_groups: list[list[bool]] = []
@@ -149,8 +150,8 @@ def reject_repeated_capture(pattern: str) -> None:
             if holds_capture and _repeats(pattern, index + 1):
                 raise InvalidConfigurationException(
                     "the pattern repeats a capturing group, which keeps only its last repetition "
-                    "(for example '(\\d+\\.){3}' yields '0.'); write it as a non-capturing group "
-                    "such as '(?:\\d+\\.){3}'"
+                    "(for example '(\\d{1,3}\\.){3}' yields '0.'); write it as a non-capturing group "
+                    "such as '(?:\\d{1,3}\\.){3}'"
                 )
             if open_groups and holds_capture:
                 open_groups[-1][1] = True
@@ -159,50 +160,319 @@ def reject_repeated_capture(pattern: str) -> None:
             index += 1
 
 
-def vet_pattern(pattern: str) -> None:
-    """Raise ``InvalidConfigurationException`` for a group that holds an ambiguous repeat and is
-    itself repeated without an upper bound, such as ``(a+)+`` or ``(\\w+\\s?)*``.
+# Characters tried when asking whether two pieces of a pattern can start with the same character:
+# every code point up to U+2FFF (Latin, Greek, Cyrillic, Hebrew, Arabic, Indic scripts, general
+# punctuation, symbols) plus a few from the CJK, Hangul and emoji ranges.
+_PROBE = (
+    *(chr(code) for code in range(0x3000)),
+    *(chr(code) for code in range(0x3000, 0xA000, 16)),  # CJK, sampled
+    *(chr(code) for code in range(0xAC00, 0xD7A4, 16)),  # Hangul, sampled
+    *(chr(code) for code in range(0x1F300, 0x1F650, 4)),  # emoji, sampled
+)
+_ZERO_WIDTH_ESCAPES = frozenset("bBAZ")
+_ESCAPE_HEX_DIGITS = {"x": 2, "u": 4, "U": 8}
 
-    That shape takes exponential time on a near-miss. This is a conservative filter, not a
-    guarantee: overlapping alternations like ``(a|aa)+`` pass and ``re`` has no time limit, so
-    untrusted callers should stay away from custom patterns (docs/privacy-and-security.md).
+
+@functools.lru_cache(maxsize=1024)
+def _characters_matching(token: str) -> frozenset[str]:
+    """The characters that one pattern token (a literal, escape, class or ``.``) can match.
+
+    Found by trying every probe character, plus the character itself (in both cases) when the
+    token is a single literal, so that a literal outside the probe ranges still overlaps with
+    itself. Compared without regard to case, so ``a`` and ``A`` count as overlapping. A token
+    that does not compile stands for every character: when in doubt, they overlap.
     """
-    groups: list[bool] = []  # per open group: does it contain an ambiguous repeat?
+    try:
+        regex = re.compile(token, re.IGNORECASE)
+    except re.error:
+        return frozenset(_PROBE)
+    matching = {char for char in _PROBE if regex.fullmatch(char)}
+    literal = token[1:] if len(token) == 2 and token[0] == "\\" and not token[1].isalnum() else token
+    if len(literal) == 1 and literal != ".":
+        matching |= {literal, literal.lower(), literal.upper()}
+    return frozenset(matching)
+
+
+def _minimum_repeat(pattern: str, index: int, length: int) -> int:
+    """The fewest times the quantifier of ``length`` characters at ``index`` lets its token occur."""
+    if length == 0:
+        return 1
+    char = pattern[index]
+    if char in "*?":
+        return 0
+    if char == "{":
+        return int(pattern[index + 1 : pattern.find("}", index)].partition(",")[0] or 0)
+    return 1
+
+
+def _leading_tokens(branch: str) -> list[str] | None:
+    """The tokens one alternative of a group can begin with, or ``None`` if it cannot be told.
+
+    The first token counts, and so does each one after it for as long as the tokens before them
+    may match nothing (``a?b`` can begin with ``a`` or ``b``). Zero-width anchors are skipped.
+    A group, a look-around or a back-reference at the start is not analysed.
+    """
+    tokens: list[str] = []
+    index = 0
+    while index < len(branch):
+        char = branch[index]
+        if char in "^$":
+            index += 1
+            continue
+        if char == "\\":
+            escaped = branch[index + 1 : index + 2]
+            if not escaped or (escaped.isdigit() and escaped != "0"):
+                return None  # a dangling backslash or a back-reference
+            if escaped in _ZERO_WIDTH_ESCAPES:
+                index += 2
+                continue
+            end = index + 2 + _ESCAPE_HEX_DIGITS.get(escaped, 0)
+            if escaped == "N" and branch[end : end + 1] == "{":
+                end = branch.find("}", end) + 1 or len(branch)
+            token = branch[index:end]
+        elif char == "[":
+            end = _skip_character_class(branch, index)
+            token = branch[index:end]
+        elif char in "(*+?":
+            return None
+        else:
+            end = index + 1
+            token = "." if char == "." else re.escape(char)
+        _, _, length = _quantifier_at(branch, end)
+        tokens.append(token)
+        index = end + length
+        if _minimum_repeat(branch, end, length) >= 1:
+            break
+    return tokens
+
+
+def _matches_empty(branch: str) -> bool:
+    try:
+        return re.fullmatch(branch, "") is not None
+    except re.error:  # a piece that only makes sense inside the whole pattern
+        return False
+
+
+def _branches_overlap(branches: list[str]) -> bool:
+    """Whether the alternatives of a group cannot be told apart by their first character.
+
+    That is so when one of them can match nothing, when two of them can begin with the same
+    character (``a`` and ``aa``, ``foo`` and ``foobar``, ``\\w`` and ``a``, ``\\d`` and ``1``), or
+    when one begins with something that is not analysed (a nested group, a look-around, a
+    back-reference). Repeated, such a group lets the same text be split in many ways, which takes
+    exponential time on a near-miss: ``(a|aa)+``.
+    """
+    seen: set[str] = set()
+    for branch in branches:
+        if _matches_empty(branch):
+            return True
+        tokens = _leading_tokens(branch)
+        if not tokens:
+            return True
+        first: set[str] = set()
+        for token in tokens:
+            first |= _characters_matching(token)
+        if first & seen:
+            return True
+        seen |= first
+    return False
+
+
+_MAX_CHAIN = 3  # this many overlapping unbounded repeats in a row are refused
+_CLASS_ESCAPES = frozenset("wWdDsS")
+_EVERYTHING = frozenset(_PROBE)
+
+
+class _Group:
+    """What vet_pattern knows about an open group (or the top level) while it scans."""
+
+    __slots__ = ("ambiguous", "body_start", "has_literal", "lookaround", "run", "splits", "unbounded")
+
+    def __init__(self, body_start: int, *, lookaround: bool = False) -> None:
+        self.body_start = body_start
+        self.lookaround = lookaround
+        self.splits: list[int] = []  # positions of the "|" that belong to this group
+        self.ambiguous = False  # holds a repeat that can split text in several ways
+        self.unbounded = False  # holds a repeat with no upper bound
+        self.has_literal = False  # holds a fixed character, which separates repeats around it
+        # characters matched by the unbounded repeats that follow each other here and can
+        # match the same text: three of them make the match time grow with the cube of the input
+        self.run: list[frozenset[str]] = []
+
+
+def _atom_at(pattern: str, index: int) -> tuple[str | None, bool, int]:
+    """The atom that starts at ``index`` as ``(token, is_literal, end)``.
+
+    ``token`` is ``None`` for something that matches no character (an anchor, ``\\b``, a stray
+    quantifier); ``is_literal`` is true for one fixed character, so not for ``.``, a class,
+    ``\\w``-style escapes or a back-reference.
+    """
+    char = pattern[index]
+    if char == "\\":
+        escaped = pattern[index + 1 : index + 2]
+        if not escaped:
+            return None, False, index + 1
+        if escaped in _ZERO_WIDTH_ESCAPES:
+            return None, False, index + 2
+        end = index + 2 + _ESCAPE_HEX_DIGITS.get(escaped, 0)
+        if escaped == "N" and pattern[end : end + 1] == "{":
+            end = pattern.find("}", end) + 1 or len(pattern)
+        is_literal = not (escaped in _CLASS_ESCAPES or (escaped.isdigit() and escaped != "0"))
+        return pattern[index:end], is_literal, end
+    if char == "[":
+        end = _skip_character_class(pattern, index)
+        return pattern[index:end], False, end
+    if char == ".":
+        return ".", False, index + 1
+    if char in "^$":
+        return None, False, index + 1
+    if char in "*+?" or (char == "{" and _quantifier_at(pattern, index)[2]):
+        return None, False, index + 1  # a quantifier with nothing to repeat: the pattern is invalid anyway
+    return re.escape(char), True, index + 1
+
+
+def _extend_run(
+    run: list[frozenset[str]], chars: frozenset[str], minimum: int, *, unbounded: bool, literal: bool
+) -> bool:
+    """Note one more repeat in the current run; ``True`` once the run is as long as it may be.
+
+    A fixed character that must occur ends the run: the repeats before it and after it cannot
+    swap text freely (``.*foo.*bar.*`` is fine). A bounded token or one that may be absent does
+    not end it. An unbounded repeat joins the run when it can match some of the same
+    characters as one already in it, and starts a new run when it is mandatory and shares none
+    (``\\d+\\s+\\d+``: digits and spaces cannot trade places). One that may be absent and shares
+    none is passed over, because the others then become neighbours (``\\d+\\s*\\d+``).
+    """
+    if literal and minimum >= 1 and not unbounded:
+        run.clear()
+        return False
+    if not unbounded:
+        return False
+    if not run or any(chars & member for member in run):
+        run.append(chars)
+    elif minimum >= 1:
+        run[:] = [chars]
+    return len(run) >= _MAX_CHAIN
+
+
+def _first_characters(branches: list[str]) -> frozenset[str]:
+    """Every character a group made of ``branches`` can begin with (all of them if unknown)."""
+    first: set[str] = set()
+    for branch in branches:
+        tokens = _leading_tokens(branch)
+        if not tokens:
+            return _EVERYTHING
+        for token in tokens:
+            first |= _characters_matching(token)
+    return frozenset(first)
+
+
+def _starts_with_literal(branch: str) -> bool:
+    return bool(branch) and _atom_at(branch, 0)[1]
+
+
+def vet_pattern(pattern: str) -> None:
+    """Raise ``InvalidConfigurationException`` for a pattern shape that can take exponential or
+    high-degree polynomial time on a near-miss.
+
+    Rejected: a group that holds a repeat without an upper bound and is itself repeated, however
+    the outer repeat is bounded (``(a+)+``, ``(\\w+\\s?)*``, ``(a+){2}``, ``(a+){2,64}``); a group
+    that holds any ambiguous repeat and is repeated without an upper bound (``(a{1,64})+``); a
+    repeated group whose alternatives cannot be told apart by their first character
+    (``(a|aa)+``, ``(\\w|a)*``, ``(x|)+``); and three or more unbounded repeats in a row that can
+    match the same text with no fixed character between them (``.*.*.*x``, ``\\w+.*\\w+@``,
+    ``.+[a-z]+.*!``). A bounded repeat of a bounded one, such as the ``(\\d{1,3}\\.){3}`` of an
+    IPv4 address, passes, and so does ``^.*foo.*bar.*$``, whose repeats are kept apart by text.
+
+    This is a conservative filter, not a guarantee: ``re`` has no time limit, and a pattern can
+    be slow in ways that are not looked for, so untrusted callers should stay away from custom
+    patterns (docs/privacy-and-security.md).
+    """
+    root = _Group(0)
+    groups: list[_Group] = []
     index = 0
     while index < len(pattern):
         char = pattern[index]
-        if char == "\\":
-            index += 2
-        elif char == "[":
-            index = _skip_character_class(pattern, index)
-        elif char == "(":
-            groups.append(False)
+        scope = groups[-1] if groups else root
+        if char == "(":
             index += 1
+            lookaround = pattern.startswith(("?=", "?!", "?<=", "?<!"), index)
             if pattern.startswith("?", index):  # (?: (?= (?P<name> (?i) ...
                 marker_end = index + 1
                 while marker_end < len(pattern) and pattern[marker_end] not in ":=!>)":
                     marker_end += 1
                 index = marker_end if pattern[marker_end : marker_end + 1] == ")" else marker_end + 1
+            groups.append(_Group(index, lookaround=lookaround))
+        elif char == "|":
+            scope.splits.append(index)
+            scope.run.clear()  # the next alternative starts afresh
+            index += 1
         elif char == ")":
-            contained = groups.pop() if groups else False
+            group = groups.pop() if groups else _Group(index)
+            parent = groups[-1] if groups else root
             ambiguous, unbounded, length = _quantifier_at(pattern, index + 1)
-            if contained and unbounded:
+            repeated = _repeats(pattern, index + 1)
+            if (group.ambiguous and unbounded) or (group.unbounded and repeated):
                 raise InvalidConfigurationException(
                     "the pattern repeats a group that itself repeats without an upper bound "
-                    "(for example '(a+)+'), which can take exponential time; use bounded "
-                    "quantifiers such as {1,64}"
+                    "(for example '(a+)+' or '(a+){2}'), which can take exponential or high-degree "
+                    "polynomial time; use bounded quantifiers such as {1,64}"
                 )
-            if groups and (contained or ambiguous):
-                groups[-1] = True
+            cuts = [group.body_start, *(split + 1 for split in group.splits)]
+            ends = [*group.splits, index]
+            branches = [pattern[start:end] for start, end in zip(cuts, ends, strict=True)]
+            if repeated and group.splits and _branches_overlap(branches):
+                raise InvalidConfigurationException(
+                    "the pattern repeats a group whose alternatives overlap (for example "
+                    "'(a|aa)+'), which can take exponential time; make the alternatives begin "
+                    "with different characters, or drop the repeat"
+                )
+            minimum = _minimum_repeat(pattern, index + 1, length)
+            if not group.lookaround:
+                if unbounded:
+                    if _extend_run(
+                        parent.run, _first_characters(branches), minimum, unbounded=True, literal=False
+                    ):
+                        raise _chain_error()
+                elif minimum >= 1 and not group.splits:
+                    # a plain group is part of the sequence around it: its fixed text separates
+                    # what comes before from what comes after, and the repeats it ends with
+                    # continue the run, so that (.*)(.*)(.*) counts like .*.*.*
+                    if group.has_literal:
+                        parent.run.clear()
+                        parent.has_literal = True
+                    for member in group.run:
+                        if _extend_run(parent.run, member, 0, unbounded=True, literal=False):
+                            raise _chain_error()
+                elif minimum >= 1 and all(_starts_with_literal(branch) for branch in branches):
+                    parent.run.clear()  # every alternative opens with fixed text
+                    parent.has_literal = True
+            parent.ambiguous = parent.ambiguous or group.ambiguous or ambiguous
+            parent.unbounded = parent.unbounded or group.unbounded or unbounded
             index += 1 + length
         else:
-            ambiguous, _, length = _quantifier_at(pattern, index)
-            if length:
-                if ambiguous and groups:
-                    groups[-1] = True
-                index += length
-            else:
-                index += 1
+            token, literal, end = _atom_at(pattern, index)
+            ambiguous, unbounded, length = _quantifier_at(pattern, end)
+            if token is not None:
+                if length:
+                    scope.ambiguous = scope.ambiguous or ambiguous
+                    scope.unbounded = scope.unbounded or unbounded
+                minimum = _minimum_repeat(pattern, end, length)
+                if literal and minimum >= 1 and not unbounded:
+                    scope.has_literal = True
+                chars = _characters_matching(token) if unbounded else frozenset()
+                if _extend_run(scope.run, chars, minimum, unbounded=unbounded, literal=literal):
+                    raise _chain_error()
+            index = end + length
+
+
+def _chain_error() -> InvalidConfigurationException:
+    return InvalidConfigurationException(
+        f"the pattern chains {_MAX_CHAIN} or more repeats without an upper bound that can match "
+        "the same text and are not kept apart by fixed characters (for example '.*.*.*x' or "
+        "'\\w+.*\\w+@'), which takes polynomial time that grows with every added repeat; "
+        "separate them with literal text or use bounded quantifiers such as {1,64}"
+    )
 
 
 class RegexExtractor:

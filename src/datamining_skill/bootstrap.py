@@ -27,6 +27,7 @@ from datamining_skill.application.result_aggregator import ResultAggregator
 from datamining_skill.application.support import stat_regular_file
 from datamining_skill.domain.exceptions import (
     InvalidConfigurationException,
+    StateStoreException,
     UnsupportedDataFormatException,
 )
 from datamining_skill.domain.models import format_size
@@ -283,6 +284,12 @@ def run_mining(
             shutil.rmtree(layout.scratch_dir, ignore_errors=True)
         with StateManager(layout.state_path, allowed_roots=roots) as state:
             fingerprint = _source_fingerprint(source_path)
+            earlier = state.get_meta("source")
+            if earlier is not None and not _same_source(earlier, fingerprint):
+                raise StateStoreException(
+                    "the source changed since this run began (its size, modification time or "
+                    "content differs); repeat the command with --overwrite to start over"
+                )
             finished = _finished_summary(state, output_path, fingerprint, started)
             if finished is not None:
                 return finished
@@ -319,9 +326,37 @@ def run_mining(
             return replace(summary, source_transform=transform)
 
 
+_FINGERPRINT_WINDOW = 64 * 1024  # three windows of this size are hashed, whatever the file's size
+
+
 def _source_fingerprint(source: Path) -> str:
-    info = source.stat()
-    return f"{info.st_size}:{info.st_mtime_ns}"
+    """``size:modified-time:digest`` of a source, reading at most 192 KiB of it.
+
+    The digest covers 64 KiB from the start, the middle and the end of the file, so changing
+    bytes in place keeps neither the fingerprint (when they lie in one of those windows) nor
+    a state database that was begun for the old content. It is a tripwire and not a checksum:
+    a change elsewhere in a large file that also keeps its size and modification time is not
+    seen.
+    """
+    digest = hashlib.blake2b(digest_size=16)
+    with source.open("rb") as handle:
+        info = os.fstat(handle.fileno())  # the same file that is read below
+        for offset in (
+            0,
+            max(0, info.st_size // 2 - _FINGERPRINT_WINDOW // 2),
+            max(0, info.st_size - _FINGERPRINT_WINDOW),
+        ):
+            handle.seek(offset)
+            digest.update(handle.read(_FINGERPRINT_WINDOW))
+    return f"{info.st_size}:{info.st_mtime_ns}:{digest.hexdigest()}"
+
+
+def _same_source(stored: str, current: str) -> bool:
+    """Whether the fingerprint saved by an earlier run describes the file as it is now."""
+    if stored == current:
+        return True
+    # a state database begun by a release that kept only the size and the time
+    return stored.count(":") == 1 and current.rsplit(":", 1)[0] == stored
 
 
 def _prepare_source(

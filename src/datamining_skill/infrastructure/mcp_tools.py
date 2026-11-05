@@ -365,9 +365,12 @@ def _mine_schema(allow_custom_patterns: bool) -> dict[str, Any]:
             "description": (
                 "Python regular expression to extract instead of e-mail addresses. Each match "
                 "(or the tuple of its capture groups) becomes one output row. Use bounded "
-                "quantifiers such as {1,64}; patterns with nested unbounded quantifiers like "
-                "(a+)+ are rejected because they can hang the machine. A repeated capturing "
-                "group such as (\\d+\\.){3} is rejected too: write (?:\\d+\\.){3}."
+                "quantifiers such as {1,64}. Patterns that repeat a group holding an unbounded "
+                "repeat, like (a+)+ or (a+){2}, or a repeated group whose alternatives begin "
+                "alike, like (a|aa)+, or three unbounded repeats in a row with no fixed text "
+                "between them, like .*.*.*x, are rejected because they can hang the machine. A repeated "
+                "capturing group such as (\\d{1,3}\\.){3} is rejected too: write "
+                "(?:\\d{1,3}\\.){3}."
             ),
         }
         properties["fields"] = {

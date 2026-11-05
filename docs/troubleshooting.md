@@ -40,7 +40,7 @@ symbolic links are resolved. Relative paths start at the first allowed directory
 | `the output file already exists; choose another path or allow overwriting` | A result from another job is in the way. Pick another output path, or add `--overwrite` to replace it. Changing a setting (pattern, `--unique`, ...) counts as another job. |
 | `this mining job is already running in another process` | Another process holds the job's lock. Wait for it, or stop it; a killed process releases the lock by itself. |
 | `the pattern repeats a capturing group` | Use `(?:...)` for groups you only repeat: `(?:\d{1,3}\.){3}\d{1,3}`. With capturing groups, each group becomes a column. |
-| `the source changed since this run began` | The file was edited after the run started. Start over with `--overwrite`. |
+| `the source changed since this run began` | The file's size, modification time or content (checked at its start, middle and end) differs from what the run began with, even if only the time was touched. Start over with `--overwrite`. A result made from the old content is not resumed. |
 | `the file is shorter than the byte range being read` | The source was truncated or replaced while it was mined. The affected chunks failed; restore the file and run the same command again. |
 | `N chunk(s) failed; the result is incomplete` | The first reason is printed. Fix it and repeat the command: only the failed chunks run again. |
 | `write-ahead logging could not be enabled` | The workspace is on a network drive. SQLite needs a local disk: use `--workspace` on a local folder. |

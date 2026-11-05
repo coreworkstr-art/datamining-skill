@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import os
+import sqlite3
+from collections.abc import Callable, Sequence
+from contextlib import closing
+from hashlib import blake2b
 from pathlib import Path
 from typing import Any
 
@@ -9,13 +14,26 @@ import pytest
 
 from datamining_skill import (
     ChunkingConfig,
+    ChunkMetadata,
+    CsvFormatter,
     InvalidConfigurationException,
+    MinerWorker,
     MiningProgress,
     MiningSummary,
     OutputIntegrityException,
+    RegexExtractor,
+    SourceDescriptor,
+    StateManager,
+    StateStoreException,
     run_mining,
 )
 from datamining_skill.application import miner_worker
+from datamining_skill.application.options import MiningOptions
+from datamining_skill.bootstrap import run_layout
+from datamining_skill.domain.models import EncodingInfo
+from datamining_skill.infrastructure import FileStreamReader
+from datamining_skill.infrastructure.scratch import LocalScratchStore
+from tests.conftest import SCRATCH_ROOT
 from tests.support import load_simulation
 from tests.test_orchestration import Crash
 
@@ -179,3 +197,182 @@ def test_changing_any_setting_starts_a_new_job(state_dir: Path, setting: dict[st
     other = mine(state_dir / "in.csv", state_dir / "second.csv", state_dir, **setting)
 
     assert not other.resumed and not first.already_complete
+
+
+# ----------------------------------------------- the hashes in the state file are keyed
+
+
+def die_after(chunks: int) -> Callable[[MiningProgress], None]:
+    """A progress callback that kills the run once ``chunks`` chunks have finished."""
+    reports = 0
+
+    def callback(_: MiningProgress) -> None:
+        nonlocal reports
+        reports += 1
+        if reports == chunks + 1:  # the first report comes before any chunk
+            raise Crash
+
+    return callback
+
+
+def state_path_of(workspace: Path, source: Path, output: Path) -> Path:
+    return run_layout(workspace, source, output, MiningOptions(unique=True).fingerprint()).state_path
+
+
+def stored_keys(state_path: Path) -> set[bytes]:
+    with closing(sqlite3.connect(state_path)) as connection:
+        return {bytes(row[0]) for row in connection.execute("SELECT key FROM seen_records")}
+
+
+def stored_secret(state_path: Path) -> str | None:
+    with closing(sqlite3.connect(state_path)) as connection:
+        row = connection.execute("SELECT value FROM job_meta WHERE name = ?", ("dedupe_key",)).fetchone()
+    return None if row is None else str(row[0])
+
+
+def interrupted_unique_job(workspace: Path, name: str = "out.csv", chunks: int = 3) -> tuple[Path, Path]:
+    source, output = workspace / "in.csv", workspace / name
+    if not source.exists():
+        build_source(source)
+    with pytest.raises(Crash):
+        mine(source, output, workspace, unique=True, on_progress=die_after(chunks))
+    return output, state_path_of(workspace, source, output)
+
+
+def test_the_hashes_left_by_an_interrupted_run_are_keyed_not_the_plain_hash_of_the_record(state_dir: Path) -> None:
+    output, state_path = interrupted_unique_job(state_dir)
+
+    keys = stored_keys(state_path)
+    secret = bytes.fromhex(stored_secret(state_path) or "")
+    written = output.read_bytes().splitlines(keepends=True)[1:]  # the header is not a record
+
+    assert written and len(secret) == 32
+    keyed = {blake2b(line, digest_size=16, key=secret).digest() for line in written}
+    plain = {blake2b(line, digest_size=16).digest() for line in written}
+    assert keyed <= keys  # every record that was written is remembered under its keyed hash
+    assert not plain & keys  # and a table of plain hashes of guessed addresses finds none of them
+
+
+def test_the_secret_is_made_once_kept_across_resumed_runs_and_purged_when_the_job_ends(state_dir: Path) -> None:
+    source = state_dir / "in.csv"
+    output, state_path = interrupted_unique_job(state_dir, chunks=2)
+    first = stored_secret(state_path)
+    keys_after_first = stored_keys(state_path)
+    assert first is not None and len(bytes.fromhex(first)) == 32
+
+    with pytest.raises(Crash):  # resumed, and killed again further on
+        mine(source, output, state_dir, unique=True, on_progress=die_after(2))
+    assert stored_secret(state_path) == first  # the same key, so the old hashes still match
+    assert keys_after_first < stored_keys(state_path)
+
+    _, first_seen = build_source(state_dir / "again.csv")  # what a complete run must produce
+    finished = mine(source, output, state_dir, unique=True)
+
+    assert finished.succeeded and rows_of(output) == first_seen  # no repeat slipped through the restarts
+    assert stored_secret(state_path) is None and stored_keys(state_path) == set()
+    leftovers = b"".join(file.read_bytes() for file in state_path.parent.glob(state_path.name + "*"))
+    assert first.encode() not in leftovers and bytes.fromhex(first) not in leftovers
+
+
+def test_every_job_has_a_secret_of_its_own(state_dir: Path) -> None:
+    _, first = interrupted_unique_job(state_dir, "first.csv")
+    _, second = interrupted_unique_job(state_dir, "second.csv")
+
+    assert stored_secret(first) != stored_secret(second)
+
+
+def test_a_job_without_the_secret_cannot_be_matched_against_another_jobs_hashes(state_dir: Path) -> None:
+    output, state_path = interrupted_unique_job(state_dir)
+    other_secret = os.urandom(32)
+    written = output.read_bytes().splitlines(keepends=True)[1:]
+
+    foreign = {blake2b(line, digest_size=16, key=other_secret).digest() for line in written}
+
+    assert not foreign & stored_keys(state_path)
+
+
+def test_the_state_manager_keeps_its_secret_across_reopening(state_dir: Path) -> None:
+    path = state_dir / "s.sqlite3"
+    with StateManager(path, allowed_roots=[SCRATCH_ROOT]) as state:
+        first = state.dedupe_key()
+        assert state.dedupe_key() == first and len(first) == 32
+    with StateManager(path, allowed_roots=[SCRATCH_ROOT]) as state:
+        assert state.dedupe_key() == first
+
+
+def test_releasing_the_keys_also_deletes_the_secret(state_dir: Path) -> None:
+    path = state_dir / "s.sqlite3"
+    with StateManager(path, allowed_roots=[SCRATCH_ROOT]) as state:
+        state.initialize([ChunkMetadata(1, 0, 10)])
+        secret = state.dedupe_key()
+        state.register(1, [blake2b(b"a@b.test\n", digest_size=16, key=secret).digest()])
+
+        state.release_keys()
+
+        assert state.get_meta("dedupe_key") is None
+        assert state.register(1, [bytes(16)]) == [True]  # the hash table is empty again
+    on_disk = b"".join(file.read_bytes() for file in state_dir.glob("s.sqlite3*"))
+    assert secret.hex().encode() not in on_disk
+
+
+def test_a_job_begun_with_plain_hashes_carries_on_without_a_key(state_dir: Path) -> None:
+    """A state file made by a release that hashed without a key must keep finding its repeats."""
+    path = state_dir / "legacy.sqlite3"
+    with StateManager(path, allowed_roots=[SCRATCH_ROOT]) as state:
+        state.initialize([ChunkMetadata(1, 0, 10)])
+        state.register(1, [blake2b(b"old@record.test\n", digest_size=16).digest()])
+
+        assert state.dedupe_key() == b""
+        assert state.get_meta("dedupe_key") == ""
+    with StateManager(path, allowed_roots=[SCRATCH_ROOT]) as state:
+        assert state.dedupe_key() == b""
+
+
+def test_a_damaged_secret_is_reported_and_not_replaced_silently(state_dir: Path) -> None:
+    with StateManager(state_dir / "s.sqlite3", allowed_roots=[SCRATCH_ROOT]) as state:
+        state.set_meta("dedupe_key", "not-hex")
+
+        with pytest.raises(StateStoreException, match="damaged"):
+            state.dedupe_key()
+
+
+class PlainStore:
+    """A unique-key store that knows nothing about secrets, like a test double or an older store."""
+
+    def __init__(self) -> None:
+        self.registered: list[bytes] = []
+
+    def register(self, chunk_id: int, keys: Sequence[bytes]) -> list[bool]:
+        self.registered.extend(keys)
+        return [True] * len(keys)
+
+    def discard(self, chunk_id: int) -> None:
+        pass
+
+
+def test_a_store_without_a_secret_still_gets_plain_hashes(state_dir: Path) -> None:
+    source = state_dir / "plain.csv"
+    source.write_text("id,note\n1,mail a@internal.corp.test\n", encoding="utf-8")
+    scratch = LocalScratchStore(state_dir, allowed_roots=[SCRATCH_ROOT])
+    store = PlainStore()
+    worker = MinerWorker(
+        strategy=RegexExtractor.emails(),
+        formatter=CsvFormatter(("email",)),
+        streams=FileStreamReader(64 * 1024, 1024 * 1024),
+        scratch=scratch,
+        unique_keys=store,
+    )
+
+    worker.process(SourceDescriptor(source, EncodingInfo(name="utf-8")), ChunkMetadata(1, 0, source.stat().st_size))
+
+    written = scratch.tmp_path(1).read_bytes()
+    assert store.registered == [blake2b(written, digest_size=16).digest()]
+
+
+def test_keyed_hashing_does_not_change_what_unique_mining_writes(state_dir: Path) -> None:
+    emails, first_seen = build_source(state_dir / "in.csv")
+
+    summary = mine(state_dir / "in.csv", state_dir / "out.csv", state_dir, unique=True)
+
+    assert rows_of(state_dir / "out.csv") == first_seen
+    assert summary.duplicates_skipped == len(emails) - len(first_seen)

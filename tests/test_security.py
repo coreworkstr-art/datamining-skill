@@ -41,7 +41,7 @@ from datamining_skill import (
 from datamining_skill.application.extraction_strategy import EMAIL_PATTERN, vet_pattern
 from datamining_skill.cli import CUSTOM_PATTERN_WARNING, main
 from datamining_skill.domain.exceptions import OutputIntegrityException, printable
-from datamining_skill.infrastructure import output_sink
+from datamining_skill.infrastructure import output_sink, state_manager
 from datamining_skill.infrastructure.handlers.log_handler import _MATCH_PREFIX_CHARS, _PATTERNS
 from datamining_skill.infrastructure.mcp_tools import ToolInputError, WorkspacePolicy
 from datamining_skill.infrastructure.output_sink import LocalOutputSink
@@ -381,11 +381,30 @@ def test_builtin_email_pattern_survives_hostile_megabyte_lines() -> None:
 CATASTROPHIC = [
     r"(a+)+$", r"(a*)*", r"(.*)*x", r"(\w+\s?)+", r"((ab)+)+", r"(a{1,64})+",
     r"(?:x+)*y", r"(?P<n>a+)+", r"([a-z]+\d*)*", r"(a+){2,}",
+    # a bounded outer repeat over an unbounded inner one is polynomial, and still too slow
+    r"(a+){2}", r"(a+){2,64}", r"(\w+){3}", r"(?:[a-z]+\.){2,5}", r"((a+)b){2}", r"(?:x*y){3}",
+    r"(?:a*|b)+", r"(?:x(?:a|b)+y){2}",  # an unbounded repeat inside, however the alternatives look
+    r"(?:a{0,2}|b)+",  # a bounded but ambiguous repeat inside a group that repeats without a bound
+]  # fmt: skip
+OVERLAPPING = [
+    r"(a|aa)+", r"(foo|foobar)*", r"(\w|a)+", r"(\d|1)+", r"(a|[ab]){2,5}", r"(?:[a-c]|b)+",
+    r"(?:.|a)+", r"(?:\x61|a)+", r"(?:^a|a)+", r"(?:\bfoo|f)+",
+    r"(?:x|)+",  # an alternative that matches nothing
+    r"(?:a?|b)*",  # an alternative that can match nothing
+    "(?:\u4e2d|\u4e2d)+", "(?:\u4e2d\u6587|\u4e2d)*",  # letters far outside the ranges that are tried one by one
+    r"(a|A)+",  # the same letter with another case
+    r"(?:ab?|a)+", r"(?:a?b|a)+",  # an optional first token: the next one can begin the match too
+    r"(?:(?:a)|b)+",  # an alternative that starts with a group is not analysed, so it counts as overlapping
+    r"(?:GET|POST|PUT)+",  # POST and PUT begin alike: conservative by design
 ]  # fmt: skip
 BENIGN = [
     r"(\w+)=(\w+)", r"(\d{4})-(\d\d)-(\d\d)", r"(\d{1,3}\.){3}\d{1,3}", r"[a-z]+@[a-z]+\.com",
     r"(foo|bar)+", r"a{1,64}", r"(a+)", r"(?i)error (\w+)", r"\((\d+)\)+", r"[(a+)+]",
     r"(a?)+", r"x{,5}y", r"\d{3}-\d{4}", r"(ab){3}",
+    # alternatives that begin differently, repeated or not
+    r"(foo|bar){2}", r"(a|b)+", r"(?:\d|\s)+", r"(?:[a-f]|[x-z])+", r"(?:ab|cd|ef)*", r"(?:\.|,|;)+",
+    # an overlap that is harmless because the group is not repeated, or the bar is not an alternative
+    r"(a|aa)", r"(a|aa)?", r"(?:\d+|x)", r"(a\|aa)+", r"([a|b])+", r"a|aa|aaa",
 ]  # fmt: skip
 
 
@@ -395,9 +414,115 @@ def test_nested_unbounded_repeats_are_rejected(pattern: str) -> None:
         vet_pattern(pattern)
 
 
+@pytest.mark.parametrize("pattern", OVERLAPPING)
+def test_a_repeated_group_whose_alternatives_overlap_is_rejected(pattern: str) -> None:
+    with pytest.raises(InvalidConfigurationException, match="alternatives overlap"):
+        vet_pattern(pattern)
+
+
 @pytest.mark.parametrize("pattern", BENIGN)
 def test_ordinary_patterns_pass_the_vetting(pattern: str) -> None:
     vet_pattern(pattern)
+
+
+def test_a_bounded_repeat_of_a_bounded_repeat_is_not_mistaken_for_a_bomb() -> None:
+    """(\\d{1,3}\\.){3} holds an ambiguous repeat, but a bounded one: at most 3 x 3 ways to split."""
+    vet_pattern(r"(?:\d{1,3}\.){3}\d{1,3}")
+    vet_pattern(r"(?:[a-z]{1,8}-){2,4}[a-z]{1,8}")
+    with pytest.raises(InvalidConfigurationException, match="upper bound"):
+        vet_pattern(r"(?:[a-z]+-){2,4}[a-z]+")  # the same shape with unbounded repeats inside
+
+
+def test_the_overlap_check_looks_inside_nested_groups() -> None:
+    with pytest.raises(InvalidConfigurationException, match="alternatives overlap"):
+        vet_pattern(r"(?:x(?:a|ab)+y)")  # the overlapping group is the inner one, and it is repeated
+    vet_pattern(r"(?:x(?:a|b)+y)")  # the same shape with alternatives that begin differently
+
+
+def test_the_error_names_the_problem_and_never_echoes_the_pattern() -> None:
+    with pytest.raises(InvalidConfigurationException) as caught:
+        vet_pattern(r"(?:very-recognisable-secret|very-recognisable-secrets)+")
+
+    assert "recognisable" not in str(caught.value) and "overlap" in str(caught.value)
+
+
+def test_vetting_a_long_pattern_with_many_alternatives_stays_fast() -> None:
+    branches = "|".join(chr(0x4E00 + number) for number in range(200))  # 200 alternatives that begin differently
+    started = time.perf_counter()
+
+    vet_pattern(f"(?:{branches})+")
+
+    assert time.perf_counter() - started < 5.0
+
+
+CHAINS = [
+    r".*.*.*x", r"\w+.*\w+@", r".+[a-z]+.*!",  # the shapes named when the rule was written
+    r"\d+\s*\d+\s*\d+",  # \s* may match nothing, which makes the three \d+ neighbours
+    r"a+a+a+$", r".*\d.*\d.*", r"\S+.*\S+.*[0-9]", r"[^x]+[^y]+[^z]+", r".+.+.+", r"\w+\w+\w+", r"x*x*x*y",
+    r"(?:ab)*(?:ab)*(?:ab)*c",  # repeated groups count as repeats of what they start with
+    r"(.*)(.*)(.*)", r"(\w+)(.*)(\w+)@", r"(a*)(a*)(a*)b",  # a plain group is part of the sequence around it
+    r"\b\w+\b.*\b\w+\b",  # a zero-width anchor does not keep the repeats apart
+]  # fmt: skip
+CHAINS_KEPT_APART = [
+    r"^.*foo.*bar.*$", r".*ERROR.*timeout.*",  # fixed text between the repeats
+    r"\d+\s+\d+\s+\d+", r"\w+\s+\w+\s+\w+",  # digits and spaces, words and spaces cannot trade places
+    r"(\d+) (\d+) (\d+)", r"\w+@\w+\.\w+", r"\d+\.\d+\.\d+\.\d+", r"\s*\w+\s*:\s*\w+", r"[a-z]+-[a-z]+-[a-z]+",
+    r".*", r"^.*$", r".*.*", r"\w+.*x",  # one or two repeats are fine
+    r"(foo|bar).*(baz|qux).*zip",  # every alternative of the groups opens with fixed text
+    r"(?=.*a)(?=.*b)(?=.*c)",  # look-aheads are separate scopes
+    r"(?:foo)?.*(?:bar)?.*(?:baz)?",  # optional text does not separate, but it is not a repeat either
+]  # fmt: skip
+
+
+@pytest.mark.parametrize("pattern", CHAINS)
+def test_three_unbounded_repeats_that_can_match_the_same_text_are_rejected(pattern: str) -> None:
+    with pytest.raises(InvalidConfigurationException, match="upper bound"):
+        vet_pattern(pattern)
+
+
+@pytest.mark.parametrize("pattern", CHAINS_KEPT_APART)
+def test_repeats_kept_apart_by_fixed_text_or_by_disjoint_classes_pass(pattern: str) -> None:
+    vet_pattern(pattern)
+
+
+def test_the_wildcard_chain_from_the_specification_is_rejected_with_a_helpful_message() -> None:
+    with pytest.raises(InvalidConfigurationException) as caught:
+        vet_pattern(r".*.*.*x")
+
+    message = str(caught.value)
+    assert "upper bound" in message and "polynomial" in message and "literal text" in message
+
+
+def test_the_chain_message_never_echoes_the_pattern() -> None:
+    with pytest.raises(InvalidConfigurationException) as caught:
+        vet_pattern(r".*.*.*very-recognisable-secret")
+
+    assert "recognisable" not in str(caught.value)
+
+
+def test_a_literal_in_a_group_separates_what_comes_before_from_what_comes_after() -> None:
+    vet_pattern(r".*(?:-).*.*")  # two repeats after the literal, one before: no chain of three
+    with pytest.raises(InvalidConfigurationException, match="upper bound"):
+        vet_pattern(r".*(?:.*).*")  # the group holds no fixed text
+
+
+def test_vetting_many_distinct_repeats_stays_fast() -> None:
+    classes = "=".join(f"[{chr(97 + number % 26)}{chr(65 + number // 26)}]+" for number in range(60))
+    started = time.perf_counter()
+
+    vet_pattern(classes)
+
+    assert time.perf_counter() - started < 5.0
+
+
+def test_an_overlapping_alternation_really_is_exponential() -> None:
+    """Why the check exists: the cost of (a|aa)+ on a near-miss doubles with every added letter."""
+    def cost(letters: int) -> float:
+        started = time.perf_counter()
+        re.match(r"(a|aa)+$", "a" * letters + "!")
+        return time.perf_counter() - started
+
+    assert cost(30) > 3 * cost(26)  # four more letters: about 7 times as long
 
 
 def test_the_catastrophic_shape_really_is_catastrophic() -> None:
@@ -428,6 +553,19 @@ def test_catastrophic_pattern_refused_even_when_enabled(env: Env) -> None:
     assert refused["result"]["isError"] is True and "upper bound" in tool_text(refused)
     assert not (env.workspace / "out.csv").exists()
     assert not (env.workspace / ".scratch").exists()
+
+
+@pytest.mark.parametrize("pattern", ["(a|aa)+$", "(a+){2,64}"])
+def test_the_new_pattern_classes_are_refused_through_the_server_as_well(env: Env, pattern: str) -> None:
+    arguments = {"path": "ok.csv", "output_path": "out.csv", "pattern": pattern}
+
+    (refused,) = Client(create_mcp_server([env.workspace], allow_custom_patterns=True)).handshake_and(
+        call(2, "mine_dataset", arguments)
+    )
+
+    assert refused["result"]["isError"] is True
+    assert "overlap" in tool_text(refused) or "upper bound" in tool_text(refused)
+    assert not (env.workspace / "out.csv").exists() and not (env.workspace / ".scratch").exists()
 
 
 def test_enabling_custom_patterns_logs_a_warning(env: Env) -> None:
@@ -653,6 +791,53 @@ def test_sql_statements_are_literals_with_bound_parameters() -> None:
             assert isinstance(first, ast.Name) and (first.id in constants or first.id == "sql")
             executed += 1
     assert executed >= 15
+
+
+def test_secure_delete_is_a_module_level_literal_run_on_every_open() -> None:
+    tree = ast.parse((SRC / "infrastructure" / "state_manager.py").read_text(encoding="utf-8"))
+    constants = {
+        target.id: node.value.value
+        for node in tree.body
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+    configure = next(
+        node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "_configure"
+    )
+    executed = [
+        call.args[0].id
+        for call in ast.walk(configure)
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute) and call.func.attr == "execute"
+        and isinstance(call.args[0], ast.Name)
+    ]  # fmt: skip
+
+    assert constants["_SET_SECURE_DELETE"] == "PRAGMA secure_delete=ON"
+    assert "_SET_SECURE_DELETE" in executed
+
+
+def test_every_connection_has_secure_delete_on(state_dir: Path) -> None:
+    for name in ("first.sqlite3", "second.sqlite3"):
+        with StateManager(state_dir / name, allowed_roots=[SCRATCH_ROOT]) as state:
+            assert state._connection().execute("PRAGMA secure_delete").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize(("mode", "survives"), [("ON", False), ("OFF", True)])
+def test_secure_delete_is_what_keeps_forgotten_hashes_out_of_the_file(
+    state_dir: Path, monkeypatch: pytest.MonkeyPatch, mode: str, survives: bool
+) -> None:
+    """Without it, a deleted row's bytes stay in the page; with it they are overwritten."""
+    monkeypatch.setattr(state_manager, "_SET_SECURE_DELETE", f"PRAGMA secure_delete={mode}")
+    forgotten = bytes(range(16))
+    path = state_dir / "hashes.sqlite3"
+    with StateManager(path, allowed_roots=[SCRATCH_ROOT]) as state:
+        state.initialize([ChunkMetadata(1, 0, 10)])
+        state.register(1, [forgotten])
+        state.discard(1)
+
+    on_disk = b"".join(file.read_bytes() for file in state_dir.glob("hashes.sqlite3*"))
+
+    assert (forgotten in on_disk) is survives
 
 
 def test_hostile_text_in_a_database_path_cannot_reach_sql(state_dir: Path) -> None:

@@ -167,7 +167,8 @@ With `wait` false the result is the job description (see [`mining_status`](#mini
 
 Errors include: the output exists and `overwrite` is not set; the output is the source; the same
 job is already running (in another process, or as a background job of this server); a pattern
-with a repeated capturing group, nested unbounded quantifiers or a bad regular expression; a
+with a repeated capturing group, a repeated group that holds an unbounded repeat (`(a+){2}`) or
+alternatives that begin alike (`(a|aa)+`), or a bad regular expression; a
 compressed file that expands beyond the limit; the source changed since the run began.
 
 ## `mining_status`

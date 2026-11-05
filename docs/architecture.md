@@ -223,10 +223,12 @@ written in the same transaction as the `COMPLETED` status (see
 [Mining pipeline](#mining-pipeline-worker-aggregator-orchestrator)) and holds byte
 offsets only.
 
-`seen_records` holds one 16-byte BLAKE2 hash per distinct record written by a unique job (see
+`seen_records` holds one 16-byte keyed BLAKE2 hash per distinct record written by a unique job (see
 [Unique mining](#unique-mining)): hashes only, never content. `job_meta` records the fingerprint
-of the source (size and modification time), the size of a converted copy and the conversion that
-made it.
+of the source (size, modification time and a digest of three 64 KiB windows of its content), the
+secret that keys the hashes (`dedupe_key`), the size of a converted copy and the conversion that
+made it. Every connection sets `PRAGMA secure_delete=ON`, so deleted rows are overwritten with
+zeros instead of lingering in the page.
 
 `PRAGMA user_version` holds the schema version (currently 3); an older database is migrated
 in place on open (every DDL statement is `IF NOT EXISTS`, so existing progress is kept) and a
@@ -416,7 +418,11 @@ keeps the two paths identical. Sparse text such as a log is therefore read at cl
 
 ### Unique mining
 
-With `--unique` the worker hashes each formatted record (BLAKE2b, 16 bytes) and asks the state
+With `--unique` the worker hashes each formatted record (keyed BLAKE2b, 16 bytes; the key is a
+random 32-byte secret that `StateManager.dedupe_key()` creates on first use, keeps in `job_meta`
+so that a resumed run hashes the same way, and deletes with the hashes when the job ends. A store
+without `dedupe_key()` gets plain hashes, and so does a job begun by a release that had no key, so
+that it keeps finding its repeats) and asks the state
 database whether any record, in this chunk or an earlier one, has the same hash
 (`INSERT OR IGNORE` into `seen_records`, in batches inside one transaction); only new records are
 written. Memory stays constant because the set lives in SQLite. The hashes of a chunk are tagged
@@ -695,8 +701,12 @@ fingerprint of the job's settings (pattern, fields, `lowercase`, `unique`, `csv_
 same job therefore finds its previous progress, so repeating a call resumes it, while a job with
 other settings, or other paths, never collides: it is a new job, and an existing output file is
 then refused unless `overwrite` is set. `overwrite` deletes only that job's own state and scratch
-files, then starts fresh. A source whose size changed since the plan was made is refused rather
-than mined inconsistently. `datamining-skill clean` removes the files of finished jobs, taking each
+files, then starts fresh. A source that changed since the job began is refused rather than mined
+inconsistently: by its size (the plan was made for it) and by its fingerprint, `size:time:digest`,
+where the digest covers 64 KiB from the start, the middle and the end of the file (at most 192 KiB
+read, whatever the size). Editing bytes inside those windows without changing the size, or
+restoring the modification time afterwards, is therefore caught. It is a tripwire, not a checksum:
+a change elsewhere in a large file that keeps both size and time is not seen. `datamining-skill clean` removes the files of finished jobs, taking each
 job's lock first so that a running job is never touched.
 
 ### Command-line exit codes

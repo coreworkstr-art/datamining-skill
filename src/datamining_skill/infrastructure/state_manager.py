@@ -63,8 +63,9 @@ CREATE TABLE IF NOT EXISTS chunk_commits (
     output_end INTEGER NOT NULL CHECK (output_end >= 0)
 );
 
--- 16-byte hashes of the records written so far, for unique mining (schema v3). Hashes
--- only, never content; a chunk's keys are dropped if its attempt fails.
+-- 16-byte keyed hashes of the records written so far, for unique mining (schema v3). The
+-- key is a per-job secret in job_meta. Hashes only, never content; a chunk's keys are
+-- dropped if its attempt fails.
 CREATE TABLE IF NOT EXISTS seen_records (
     key      BLOB    PRIMARY KEY,
     chunk_id INTEGER NOT NULL
@@ -79,6 +80,7 @@ CREATE TABLE IF NOT EXISTS job_meta (
 
 _SET_JOURNAL_MODE = "PRAGMA journal_mode=WAL"
 _SET_SYNCHRONOUS = "PRAGMA synchronous=NORMAL"
+_SET_SECURE_DELETE = "PRAGMA secure_delete=ON"  # freed pages are overwritten with zeros, not left behind
 _GET_JOURNAL_MODE = "PRAGMA journal_mode"
 _GET_SYNCHRONOUS = "PRAGMA synchronous"
 _GET_USER_VERSION = "PRAGMA user_version"
@@ -128,7 +130,10 @@ _PLAN_END = "SELECT MAX(end_byte) FROM chunks"
 _REGISTER_KEY = "INSERT OR IGNORE INTO seen_records (key, chunk_id) VALUES (?, ?)"
 _DISCARD_KEYS = "DELETE FROM seen_records WHERE chunk_id = ?"
 _RELEASE_KEYS = "DELETE FROM seen_records"
+_COUNT_KEYS = "SELECT COUNT(*) FROM seen_records"
+_RELEASE_DEDUPE_KEY = "DELETE FROM job_meta WHERE name = ?"
 _VACUUM = "VACUUM"
+_DEDUPE_KEY_NAME = "dedupe_key"  # the job_meta entry that holds the secret keying the record hashes
 _GET_META = "SELECT value FROM job_meta WHERE name = ?"
 _SET_META = "INSERT OR REPLACE INTO job_meta (name, value) VALUES (?, ?)"
 
@@ -383,14 +388,39 @@ class StateManager:
         with self._transaction() as conn:
             conn.execute(_DISCARD_KEYS, (chunk_id,))
 
+    def dedupe_key(self) -> bytes:
+        """The secret that keys the hashes of this job's records, created on first use.
+
+        The hashes in ``seen_records`` are keyed BLAKE2b, so a state file left behind by an
+        interrupted run cannot be checked against a list of guessed values (an e-mail address
+        has too little entropy to resist that when hashed without a key). The key is random,
+        belongs to this job alone and is kept in ``job_meta`` so that a resumed run hashes the
+        same way; ``release_keys`` deletes it together with the hashes.
+        """
+        stored = self.get_meta(_DEDUPE_KEY_NAME)
+        if stored is None:
+            if self._scalar(_COUNT_KEYS) > 0:
+                # begun by a release that hashed without a key: those hashes cannot be redone,
+                # so this job carries on without one rather than stop finding its repeats
+                self.set_meta(_DEDUPE_KEY_NAME, "")
+                return b""
+            stored = os.urandom(32).hex()
+            self.set_meta(_DEDUPE_KEY_NAME, stored)
+        try:
+            return bytes.fromhex(stored)
+        except ValueError as exc:
+            raise StateStoreException("the stored deduplication key is damaged") from exc
+
     def release_keys(self) -> None:
-        """Forget every remembered key and return the space to the file system.
+        """Forget every remembered key and the secret that keyed them, and return the space.
 
         For a finished job: nothing will register keys again, and for a large file they take
-        about 40 bytes each.
+        about 40 bytes each. The compaction rewrites the file, which with ``secure_delete``
+        leaves neither the hashes nor the secret in unused pages.
         """
         with self._transaction() as conn:
             conn.execute(_RELEASE_KEYS)
+            conn.execute(_RELEASE_DEDUPE_KEY, (_DEDUPE_KEY_NAME,))
         try:
             self._connection().execute(_VACUUM)
         except sqlite3.Error as exc:
@@ -473,6 +503,7 @@ class StateManager:
                 "write-ahead logging could not be enabled (is the file on a network drive?)"
             )
         conn.execute(_SET_SYNCHRONOUS)
+        conn.execute(_SET_SECURE_DELETE)  # per connection, so it is set on every open
 
         version = conn.execute(_GET_USER_VERSION).fetchone()[0]
         if version not in range(SCHEMA_VERSION + 1):

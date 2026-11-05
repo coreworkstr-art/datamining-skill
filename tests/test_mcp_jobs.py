@@ -204,7 +204,7 @@ def test_an_invalid_pattern_fails_at_once_not_inside_the_background_job(state_di
     server = create_mcp_server([state_dir], allow_custom_patterns=True)
     tools = server._tools
 
-    outcome = tools.call("mine_dataset", {"path": "in.csv", "output_path": "o.csv", "pattern": r"(\d+\.){3}", "wait": False})
+    outcome = tools.call("mine_dataset", {"path": "in.csv", "output_path": "o.csv", "pattern": r"(\d{1,3}\.){3}", "wait": False})
 
     assert outcome.is_error and "non-capturing group" in str(outcome.error)
     assert tools.call("mining_status", {}).data == {"jobs": []}

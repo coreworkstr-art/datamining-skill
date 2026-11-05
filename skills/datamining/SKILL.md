@@ -75,7 +75,11 @@ Writing a pattern (Python regular expressions, matched line by line):
   its last repetition.
 - With capturing groups, each group becomes a column, so name them in `fields`:
   `(\d{4})-(\d{2})` with `fields: ["year", "month"]`.
-- Use bounded quantifiers (`{1,64}`), never nested unbounded ones such as `(a+)+`.
+- Use bounded quantifiers (`{1,64}`). A group that holds an unbounded repeat must not be repeated
+  at all, so `(a+)+` and `(a+){2}` are rejected, and neither may a repeated group whose
+  alternatives begin alike, such as `(a|aa)+`; so are three unbounded repeats in a row with no
+  fixed text between them, such as `.*.*.*x` (`.*foo.*bar.*` is fine). Write `(?:\d{1,3}\.){3}`,
+  not `(?:\d+\.){3}`.
 - A match cannot span lines.
 
 ## Behaviour to rely on

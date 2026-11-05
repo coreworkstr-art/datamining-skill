@@ -214,7 +214,12 @@ class BoundaryLocator(Protocol):
 
 
 class UniqueKeyStore(Protocol):
-    """Remembers which records were already written, so ``unique`` mining can drop repeats."""
+    """Remembers which records were already written, so ``unique`` mining can drop repeats.
+
+    A store may also offer ``dedupe_key() -> bytes``: a secret, stable for the job, that the
+    worker uses as the key of the BLAKE2b hash it registers (``StateManager`` does). Without
+    it the hashes are unkeyed. Optional, so that a simple store need not implement it.
+    """
 
     def register(self, chunk_id: int, keys: Sequence[bytes]) -> list[bool]:
         """Remember ``keys`` for ``chunk_id``; ``True`` marks each key not seen before."""

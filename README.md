@@ -381,7 +381,7 @@ flowchart LR
 | --- | --- |
 | **Data Profiler** | Reports size, encoding, format and structure from bounded samples; the record count is extrapolated from windows spread across the file. Memory is O(1). |
 | **Chunking Engine** | Chunk size is `min(15% of the RAM free now, 512 MiB)`. Boundaries are found by seeking, never by loading data, and always fall right after a newline. Refuses to run if free RAM is critically low. |
-| **State Manager** | Every chunk is PENDING, IN_PROGRESS, COMPLETED or FAILED in a SQLite database (WAL mode). Chunks left IN_PROGRESS by a crash return to PENDING automatically. It also keeps the 16-byte hashes behind `--unique`. |
+| **State Manager** | Every chunk is PENDING, IN_PROGRESS, COMPLETED or FAILED in a SQLite database (WAL mode). Chunks left IN_PROGRESS by a crash return to PENDING automatically. It also keeps the 16-byte keyed hashes behind `--unique`. |
 | **Miner Worker** | Reads exactly `[start_byte, end_byte)` in constant memory and writes records to a private scratch file. A line longer than 1 MiB is searched in overlapping windows, never skipped or cut. |
 | **Result Aggregator** | Appends a finished chunk to the output idempotently: the output's committed length is recorded in the same transaction as `COMPLETED`, and every append first truncates back to it. A crash at any point is repaired on restart. |
 

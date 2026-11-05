@@ -114,6 +114,11 @@ class MinerWorker:
         self._streams = streams
         self._scratch = scratch
         self._unique_keys = unique_keys
+        # a store that offers dedupe_key() keys the record hashes with a secret of its own, so a
+        # state file left behind cannot be checked against guessed values; one that does not
+        # (a test double, an older store) gets the plain hash
+        provider = getattr(unique_keys, "dedupe_key", None)
+        self._dedupe_secret: bytes = bytes(provider()) if provider is not None else b""
         self._json_escapes = json_escapes
         self._by_blocks = bool(getattr(strategy, "line_independent", False))
         self._span_strategy: SpanExtractionStrategy | None = (
@@ -230,7 +235,8 @@ class MinerWorker:
         if self._unique_keys is None:
             fresh = [True] * len(pending)
         else:
-            keys = [blake2b(record, digest_size=16).digest() for record in pending]
+            secret = self._dedupe_secret
+            keys = [blake2b(record, digest_size=16, key=secret).digest() for record in pending]
             fresh = self._unique_keys.register(chunk_id, keys)
         for encoded_record, is_new in zip(pending, fresh, strict=True):
             if is_new:

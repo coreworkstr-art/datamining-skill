@@ -8,6 +8,28 @@ All notable changes are recorded here. The format follows
 
 ### Security
 
+- **Custom patterns are vetted more strictly** (only offered with `--allow-custom-patterns`). A group
+  that holds an unbounded repeat is now refused when it is repeated at all, so `(a+){2}` and
+  `(a+){2,64}` join `(a+)+`, and so is a repeated group whose alternatives cannot be told apart by
+  their first character, such as `(a|aa)+`, `(\w|a)*` or `(x|)+`. A bounded repeat of a bounded one,
+  like the `(\d{1,3}\.){3}` of an IPv4 address, still passes. Three or more unbounded repeats in a row
+  that can match the same text with no fixed character between them (`.*.*.*x`, `\w+.*\w+@`,
+  `.+[a-z]+.*!`) are refused as well; `^.*foo.*bar.*$` and `\d+\s+\d+\s+\d+` pass. Write
+  `(?:\d{1,3}\.){3}` instead of `(?:\d+\.){3}`; the capture-group message now suggests that form.
+- **Record hashes in the state file are keyed.** A unique job hashes records with BLAKE2b keyed by a
+  random 32-byte secret of its own, kept in the state database and deleted with the hashes when the job
+  ends, so tables of hashes computed beforehand are useless and two jobs cannot be compared. The key
+  sits in the same file: it does not stop someone who can read the file from testing guessed values,
+  so the state database stays as sensitive as the result. A job begun by an earlier build carries on
+  with plain hashes so that it keeps finding its repeats.
+- **SQLite `secure_delete` is on**, so rows deleted from the state database (discarded hashes, the
+  secret) are overwritten with zeros instead of staying in the page.
+- **A source edited in place is noticed.** The fingerprint of a source now includes a digest of 64 KiB
+  from its start, middle and end (at most 192 KiB read), and a run is refused when it no longer matches
+  the one the job began with, also when only the modification time changed: before, a job whose source
+  had the same size resumed on whatever it found. The state database of an earlier build, which kept only
+  size and time, still resumes. The fingerprint is a tripwire and not a checksum: a change outside
+  those windows that keeps size and time is not seen.
 - **The result file can no longer be redirected or swapped.** Every open of it refuses a symbolic
   link (beforehand on every platform and, on POSIX, through `O_NOFOLLOW` when opening), accepts only
   a regular file (a named pipe fails at once instead of blocking) and compares the file's identity
