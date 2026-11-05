@@ -1,0 +1,13 @@
+name: DataMining Skill CodeQL configuration
+
+# What is left out of the scan, and why.
+#
+# tests/ holds regular expressions that are exponential on purpose: tests/test_security.py shows
+# that the pattern vetting refuses them and that they really are slow. They only ever meet short
+# strings written in the tests, so nothing can be exploited, but the query for inefficient regular
+# expressions (py/redos) reports the pattern itself, whatever it is used on.
+#
+# Everything that ships (src/) and the validation scripts (scripts/) are still scanned, and so is
+# any directory added later. tests/test_packaging.py fails if this list grows.
+paths-ignore:
+  - tests

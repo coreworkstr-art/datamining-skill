@@ -737,7 +737,10 @@ virtual environment, asserts it brings in no third-party packages, and runs
 `scripts/mcp_smoke_test.py` against the installed command. Every action is pinned to a commit.
 `.github/workflows/release.yml` turns a `vX.Y.Z` tag into a GitHub release (notes from
 `CHANGELOG.md`) and, when the repository variable `PUBLISH_TO_PYPI` is `true`, a PyPI upload with
-trusted publishing. `codeql.yml` and Dependabot watch for vulnerabilities and stale actions.
-Tests in `tests/test_packaging.py` keep the plugin manifest, the skill, the documentation links, the
+trusted publishing. `codeql.yml` and Dependabot watch for vulnerabilities and stale actions. CodeQL
+runs the `security-extended` queries on `src/` and `scripts/`; `tests/` is left out
+(`.github/codeql/codeql-config.yml` says why) because it holds regular expressions that are
+exponential on purpose, which the query for inefficient regular expressions reports although
+nothing can reach them. Tests in `tests/test_packaging.py` keep the plugin manifest, the skill, the documentation links, the
 README's option list and the workflows in step with the code.
 

@@ -215,6 +215,26 @@ def test_every_action_is_pinned_to_a_commit_and_permissions_are_declared(path: P
     assert "persist-credentials: false" in text  # a checkout does not leave the token in .git/config
 
 
+def test_codeql_names_its_configuration_and_leaves_out_nothing_but_the_tests() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "codeql.yml").read_text(encoding="utf-8")
+
+    reference = re.search(r"^\s*config-file:\s*\./(\S+)\s*$", workflow, flags=re.MULTILINE)
+
+    assert reference is not None, "the CodeQL workflow must point at its configuration file"
+    config = ROOT / reference.group(1)
+    assert config.is_file(), reference.group(1)
+    lines = config.read_text(encoding="utf-8").splitlines()
+    start = lines.index("paths-ignore:") + 1
+    ignored = []
+    for line in lines[start:]:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line.startswith(" ") or not line.strip().startswith("- "):
+            break  # the next key
+        ignored.append(line.strip()[2:].strip())
+    assert ignored == ["tests"]  # what ships (src/) and the scripts stay in the scan
+
+
 def test_the_release_workflow_publishes_through_trusted_publishing_only() -> None:
     text = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
 
