@@ -208,7 +208,7 @@ Create `.cursor/mcp.json` in your project (or `~/.cursor/mcp.json` for all proje
   affected: it uses bounded patterns, and the test suite runs it against hostile lines a megabyte
   long under a time limit.
 - What the assistant sees is masked. In `preview_result` rows and in the column names from
-  `profile_dataset`, e-mail addresses, IPv4 addresses, card numbers, T.C. kimlik numbers and IBANs
+  `profile_dataset`, e-mail addresses, IPv4 and IPv6 addresses, card numbers, T.C. kimlik numbers, IBANs and secrets (tokens, API keys)
   become tags such as `[EMAIL]`. It is a best-effort safety net, not anonymisation (see
   [docs/mcp-tools.md](docs/mcp-tools.md#masking-and-the-audit-log)), and `--unmasked-preview`
   turns it off.
@@ -251,7 +251,7 @@ datamining-skill mcp [--allow-dir DIR ...] [--allow-custom-patterns]
 | `--workspace` | Where the `.scratch/` folder with state and scratch files lives (default: the current directory). |
 | `--rows` | How many records `preview` shows (1 to 200, default 20). |
 | `--max-records` | `quality` stops after this many records (default 1,000,000) and says whether it read the whole file. |
-| `--mask` | `preview` and `quality` replace e-mail, IPv4, card, T.C. kimlik and IBAN numbers by tags such as `[EMAIL]`. |
+| `--mask` | `preview` and `quality` replace e-mail, IP, card, T.C. kimlik and IBAN numbers and secrets by tags such as `[EMAIL]`. |
 | `--unmasked-preview` | `mcp` returns preview rows and profile column names as they are. By default they are masked. |
 | `--audit-log` | `mcp` appends one JSON line per tool call (never contents) to this file, which must lie outside the allowed directories. |
 | `--all`, `--dry-run` | `clean` also removes unfinished jobs / only reports what it would remove. |

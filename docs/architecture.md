@@ -610,7 +610,7 @@ and adds no data-processing logic of its own.
 | `infrastructure/mcp_jobs.py` | `MiningJobs`: background runs on daemon threads, their progress, results and cancellation. |
 | `infrastructure/result_preview.py` | The bounded look at the start of a result file, optionally masked. |
 | `infrastructure/audit_log.py` | `AuditLog`: the append-only record of tool calls, outside the allowed directories. |
-| `application/pii_mask.py` | Best-effort masking of e-mail, IPv4, card, T.C. kimlik and IBAN numbers in what the assistant is shown. |
+| `application/pii_mask.py` | Best-effort masking of e-mail, IP, card, T.C. kimlik and IBAN numbers and secrets in what the assistant is shown. |
 | `application/data_quality.py`, `infrastructure/quality_scan.py` | The `check_quality` statistics and the single pass over a CSV or JSON Lines file that feeds them. |
 | `bootstrap.py` | `run_mining` (state/scratch layout, resume, overwrite, conversion, finished-job answer), `profile_source`, `check_quality` and `create_mcp_server`; shared by the CLI and the MCP tools. |
 | `cli.py` | `profile`, `quality`, `mine`, `preview`, `clean` and `mcp` commands; exit codes; allowed-directory resolution; the progress line. |

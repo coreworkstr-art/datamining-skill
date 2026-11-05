@@ -21,6 +21,7 @@ from datamining_skill.application.pii_mask import (
     mask_profile,
     mask_text,
     mask_value,
+    shannon_entropy,
     tckn_valid,
 )
 from datamining_skill.cli import main
@@ -120,11 +121,186 @@ def test_text_without_candidates_comes_back_unchanged() -> None:
 
 
 def test_masking_is_not_slow_on_hostile_megabyte_lines() -> None:
-    lines = ["1 " * 500_000, "0" * 1_000_000, "a@" * 500_000, "AB12 " + "A" * 1_000_000, "1.1.1." * 160_000, "4-" * 500_000]
+    lines = [
+        "1 " * 500_000,
+        "0" * 1_000_000,
+        "a@" * 500_000,
+        "AB12 " + "A" * 1_000_000,
+        "1.1.1." * 160_000,
+        "4-" * 500_000,
+        ":" * 1_000_000,
+        "a:" * 500_000,
+        "1:" * 500_000,
+        "::1" * 330_000,
+        "ffff:" * 200_000,
+        "1:2:3:4:5:6:7:8:" * 62_500,
+        "eyJ" * 330_000,
+        "eyJ" + "a" * 1_000_000,
+        ("eyJ" + "a" * 20 + ".") * 45_000,
+        "AKIA" * 250_000,
+        "ghp_" * 250_000,
+        "sk-" * 330_000,
+        "sk-" + "a" * 1_000_000,
+        "xoxb-" * 200_000,
+        "Bearer " * 140_000,
+        "Bearer " + "a" * 1_000_000,
+        "bearer" + " " * 1_000_000 + "a",
+        "Bearer a" * 120_000,
+    ]
     for line in lines:
         started = time.perf_counter()
         mask_text(line)
-        assert time.perf_counter() - started < 5.0, line[:12]
+        assert time.perf_counter() - started < 2.0, line[:12]
+
+
+# ------------------------------------------------------------------ IPv6
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "2001:0db8:85a3:0000:0000:8a2e:0370:7334",
+        "2001:db8::1",
+        "fe80::1ff:fe23:4567:890a",
+        "::1",
+        "1::",
+        "2001:db8:0:0:0:0:2:1",
+        "::ffff:192.0.2.128",
+        "64:ff9b::192.0.2.33",
+        "ABCD:EF01:2345:6789:ABCD:EF01:2345:6789",
+    ],
+)
+def test_ipv6_addresses_are_masked(address: str) -> None:
+    counts: Counter[str] = Counter()
+
+    assert mask_text(f"peer {address} up", counts) == "peer [IP] up"
+    assert counts == {"IP": 1}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "12:34:56",
+        "2026:10:31",
+        "at 12:34:56:78",
+        "1:2:3:4:5:6:7",  # seven groups and no "::"
+        "1:2:3:4:5:6:7:8:9",  # nine groups
+        "1::2::3",  # two "::"
+        "12345::1",  # a group of five digits
+        "2001:db8::g",
+        "::",  # the unspecified address holds no digit
+        "a::b",  # no decimal digit: a name in C++ or Rust
+        "dead::beef",
+        "std::vector",
+        "1:2:3:4:5:6:7::8:9",
+        "::ffff:999.0.2.128",
+        "x1::1",  # glued to a word
+        "mac 00:1a:2b:3c:4d:5e",  # six groups
+    ],
+)
+def test_text_that_only_looks_like_ipv6_is_left_alone(text: str) -> None:
+    counts: Counter[str] = Counter()
+
+    assert mask_text(text, counts) == text
+    assert sum(counts.values()) == 0
+
+
+def test_an_ipv6_address_among_other_kinds_is_counted_with_them() -> None:
+    counts: Counter[str] = Counter()
+
+    assert mask_text("10.0.0.1 and 2001:db8::1, at 12:34:56", counts) == "[IP] and [IP], at 12:34:56"
+    assert counts == {"IP": 2}
+
+
+# ------------------------------------------------------------------ secrets
+# The tokens are put together at run time, so that no complete one stands in the source.
+
+_B64 = "AbCdEfGhIjKlMnOpQrSt"
+JWT = "ey" + "J" + _B64 + ".ey" + "J" + _B64 + "." + _B64
+AWS_KEY = "AK" + "IA" + "IOSFODNN7EXAMPLE"
+GITHUB_TOKEN = "gh" + "p_" + "aB3dE5gH7jK9mN1pQ3sT5vW7yZ9bD1fH3jL5"
+GITHUB_PAT = "github" + "_pat_" + "11AAAAAAA0" + "aB3dE5gH7jK9mN1pQ3sT5vW7"
+OPENAI_KEY = "s" + "k-" + "proj-" + "aB3dE5gH7jK9mN1pQ3sT5vW7"
+ANTHROPIC_KEY = "s" + "k-" + "ant-" + "aB3dE5gH7jK9mN1pQ3sT5vW7"
+SLACK_TOKEN = "xo" + "xb-" + "123456789012-aB3dE5gH7jK9mN1pQ3sT"
+BEARER_TOKEN = "q8Zr3KfV0xL2mN7pT4wYc9Hd1Gb6Js5A"
+
+
+@pytest.mark.parametrize(
+    "token",
+    [JWT, AWS_KEY, "AS" + "IA" + "IOSFODNN7EXAMPLE", GITHUB_TOKEN, GITHUB_PAT, OPENAI_KEY, ANTHROPIC_KEY, SLACK_TOKEN],
+)
+def test_tokens_of_known_formats_are_masked(token: str) -> None:
+    counts: Counter[str] = Counter()
+
+    assert mask_text(f"key={token};", counts) == "key=[SECRET];"
+    assert counts == {"SECRET": 1}
+
+
+def test_a_high_entropy_bearer_token_is_masked_and_the_word_stays() -> None:
+    counts: Counter[str] = Counter()
+
+    assert mask_text(f"Authorization: Bearer {BEARER_TOKEN}", counts) == "Authorization: Bearer [SECRET]"
+    assert mask_text(f"authorization: bearer   {BEARER_TOKEN}") == "authorization: bearer   [SECRET]"
+    assert counts == {"SECRET": 1}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Bearer 12345",
+        "Bearer password",
+        "Bearer " + "a" * 40,  # long, but a single character
+        "Bearer 12345678901234567890",  # digits only
+        "Bearer abcdefghijklmnopqrstuvwxyz",  # one kind of character
+        "Bearer 1111111111aaaaaaaaaa",  # two kinds, but entropy 1
+        "Bearer token_for_the_test_environment",  # words
+        "bearer of bad news",
+        "Bearerxyz" + BEARER_TOKEN,  # not a separate word
+    ],
+)
+def test_bearer_values_that_are_not_random_stay_readable(text: str) -> None:
+    counts: Counter[str] = Counter()
+
+    assert mask_text(text, counts) == text
+    assert sum(counts.values()) == 0
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "sk-learn is a library",
+        "task-" + "a" * 30,  # "sk-" inside a word
+        "eyJhbGciOiJIUzI1NiJ9",  # a header alone is not a token
+        "AKIA" + "A" * 10,  # too short
+        "X" + AWS_KEY,  # glued to a word
+        "ghp_short",
+    ],
+)
+def test_text_that_only_resembles_a_secret_is_left_alone(text: str) -> None:
+    assert mask_text(text) == text
+
+
+def test_secrets_next_to_other_kinds_are_all_replaced() -> None:
+    counts: Counter[str] = Counter()
+    line = f"{AWS_KEY},ada@internal.corp.test,{JWT},2001:db8::1"
+
+    assert mask_text(line, counts) == "[SECRET],[EMAIL],[SECRET],[IP]"
+    assert counts == {"SECRET": 2, "EMAIL": 1, "IP": 1}
+
+
+def test_shannon_entropy_follows_the_definition() -> None:
+    assert shannon_entropy("") == 0.0
+    assert shannon_entropy("aaaa") == 0.0
+    assert shannon_entropy("ab") == pytest.approx(1.0)
+    assert shannon_entropy("abcd") == pytest.approx(2.0)
+    assert shannon_entropy("aabc") == pytest.approx(1.5)
+    assert shannon_entropy(BEARER_TOKEN) >= 3.8
+
+
+def test_masking_does_not_skip_text_that_holds_only_a_secret() -> None:
+    for token in (JWT, AWS_KEY, GITHUB_TOKEN, OPENAI_KEY, SLACK_TOKEN, "Bearer " + BEARER_TOKEN):
+        assert "[SECRET]" in mask_text(token)
 
 
 # ------------------------------------------------------------------ structures

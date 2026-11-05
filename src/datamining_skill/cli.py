@@ -116,7 +116,7 @@ def _build_parser() -> argparse.ArgumentParser:
     quality.add_argument(
         "--mask",
         action="store_true",
-        help="replace e-mail, IPv4, card, T.C. kimlik and IBAN numbers in field names by tags",
+        help="replace e-mail, IP, card, T.C. kimlik and IBAN numbers and secrets in field names by tags",
     )
     _add_logging_options(quality, default_level="WARNING")
 
@@ -198,7 +198,7 @@ def _build_parser() -> argparse.ArgumentParser:
     preview.add_argument(
         "--mask",
         action="store_true",
-        help="replace e-mail, IPv4, card, T.C. kimlik and IBAN numbers by tags such as [EMAIL]",
+        help="replace e-mail, IP, card, T.C. kimlik and IBAN numbers and secrets by tags such as [EMAIL]",
     )
     _add_logging_options(preview, default_level="WARNING")
 
@@ -250,7 +250,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "return preview_result rows and profile_dataset column names as they are "
-            "(by default e-mail addresses, IPv4 addresses, card, T.C. kimlik and IBAN numbers "
+            "(by default e-mail and IP addresses, secrets, card, T.C. kimlik and IBAN numbers "
             "are replaced by tags before they reach the assistant)"
         ),
     )

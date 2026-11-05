@@ -61,7 +61,7 @@ the person who started it.
 | Oversized or malformed messages | Messages are read in bounded pieces (1 MiB limit) and rejected without losing synchronisation; JSON that is too deep is rejected as a parse error. |
 | Over-broad workspace | With no `--allow-dir` and no `DATAMINING_SKILL_ALLOWED_DIRS`, the server uses its working directory and refuses to start if that is the filesystem root. |
 | Corrupting the protocol channel | stdout carries only JSON-RPC messages; `print` is redirected to stderr while serving. |
-| Leaking information in results | Tool results contain names, counts, workspace-relative paths and (for `profile_dataset` and `check_quality`) column names or JSON keys; `check_quality` otherwise reports only counts and line numbers, never a value. Mined records go to the output file and are never logged; the only way they reach the client is `preview_result` (at most 256 KiB), whose rows, like the column names of `profile_dataset`, have e-mail, IPv4, card, T.C. kimlik and IBAN numbers replaced by tags unless the operator starts the server with `--unmasked-preview`. See "Masking" below. |
+| Leaking information in results | Tool results contain names, counts, workspace-relative paths and (for `profile_dataset` and `check_quality`) column names or JSON keys; `check_quality` otherwise reports only counts and line numbers, never a value. Mined records go to the output file and are never logged; the only way they reach the client is `preview_result` (at most 256 KiB), whose rows, like the column names of `profile_dataset`, have e-mail, IPv4 and IPv6 addresses, card, T.C. kimlik and IBAN numbers and secrets (tokens, keys) replaced by tags unless the operator starts the server with `--unmasked-preview`. See "Masking" below. |
 | No trace of what the assistant did | `--audit-log FILE` appends one JSON line per tool call (time, tool, paths, counts, never contents). The file must lie outside the allowed directories, so the assistant can neither read nor overwrite it. See "Audit log" below. |
 
 Residual risks:
@@ -139,15 +139,33 @@ file system without ACLs (FAT) the call fails quietly and the object keeps whate
 
 ### Masking
 
-`application/pii_mask.py` replaces e-mail addresses, IPv4 addresses, payment card numbers (Luhn),
-Turkish national identity numbers (both check digits) and IBANs (mod 97) with tags before a
-preview or profile reaches the assistant. Checksums keep ordinary numbers from being hidden.
-Verified by tests with valid and invalid numbers, overlapping candidates and hostile
-megabyte-long lines.
+`application/pii_mask.py` replaces e-mail addresses (`[EMAIL]`), IPv4 and IPv6 addresses (`[IP]`),
+payment card numbers (`[CARD]`, Luhn), Turkish national identity numbers (`[TCKN]`, both check
+digits), IBANs (`[IBAN]`, mod 97) and secrets (`[SECRET]`) with tags before a preview or profile
+reaches the assistant. Checksums, formats and entropy keep ordinary text and numbers from being
+hidden.
 
-What masking is not: it does not recognise names, postal addresses, phone numbers, IPv6
-addresses or anything written in free text, it leaves a number with a mistyped digit alone, and
-it does not touch the result file or the source. Describe it as a safety net that lowers the
+- **IPv6** is checked by a small parser: eight groups of one to four hex digits, or fewer with one
+  `::`, with an IPv4 tail allowed. A time (`12:34:56`), a date (`2026:10:31`), a MAC address and
+  `std::vector` are not addresses and stay readable. An address needs at least one decimal digit,
+  and one glued to a preceding colon or word is not found.
+- **Secrets** are masked in two ways. Tokens with a format of their own are masked whole: JSON Web
+  Tokens, AWS access key ids (`AKIA`, `ASIA`), GitHub tokens (`ghp_`, `gho_`, `ghu_`, `ghs_`,
+  `ghr_`, `github_pat_`), OpenAI and Anthropic keys (`sk-`) and Slack tokens (`xox...`). The value
+  after `Bearer` is masked (the word stays) only when it looks random: at least 20 characters, at
+  least two kinds of character (lower case, upper case, digits, symbols) and a Shannon entropy of
+  at least 3.8 bits per character. `Bearer 12345`, `Bearer password` and a repeated string stay
+  readable.
+
+Every pattern is bounded and begins at a token boundary, so the time grows linearly with the
+text. Verified by tests with valid and invalid numbers, overlapping candidates and hostile
+megabyte-long lines, each of which must be done in under two seconds.
+
+What masking is not: it does not recognise names, postal addresses, phone numbers or anything
+written in free text, a secret of another shape or a token longer than its limit (the first
+4 096 characters of a JWT part, 512 of a Bearer value) is masked only in part or not at all, a
+random word that looks like a password is not a secret to it, it leaves a number with a mistyped
+digit alone, and it does not touch the result file or the source. Describe it as a safety net that lowers the
 chance of personal data reaching a model, never as anonymisation or as compliance with the
 GDPR or the KVKK. An operator who needs the rows unchanged starts the server with
 `--unmasked-preview`; a warning is printed, and the assistant cannot change the setting.

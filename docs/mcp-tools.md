@@ -236,13 +236,16 @@ makes its first data row the "column names"), these are replaced by a tag:
 | --- | --- | --- |
 | E-mail address | `[EMAIL]` | the built-in e-mail pattern |
 | IPv4 address | `[IP]` | four octets from 0 to 255 |
+| IPv6 address | `[IP]` | eight groups, or fewer with one `::`; needs a decimal digit |
 | Payment card number, 13 to 19 digits | `[CARD]` | Luhn |
 | Turkish national identity number (T.C. kimlik no) | `[TCKN]` | the two check digits |
 | IBAN | `[IBAN]` | ISO 7064 mod 97 |
+| JWT, AWS key id, GitHub, OpenAI/Anthropic or Slack token | `[SECRET]` | the token's format |
+| Value after `Bearer` | `[SECRET]` | 20+ characters, two kinds of character, entropy of 3.8 bits or more |
 
 `pii_masked` in the result counts the replacements per tag. The checks keep ordinary numbers from
-being hidden, but masking is best effort: names, postal addresses, phone numbers, IPv6 addresses
-and free text are not recognised, and a number with a mistyped digit is left alone. It is a safety
+being hidden, but masking is best effort: names, postal addresses, phone numbers, secrets of other
+shapes and free text are not recognised, and a number with a mistyped digit is left alone. It is a safety
 net, not anonymisation. `--unmasked-preview` turns it off and prints a warning on stderr.
 
 **The audit log** (`--audit-log FILE`) appends one JSON line per tool call: time, tool, whether it

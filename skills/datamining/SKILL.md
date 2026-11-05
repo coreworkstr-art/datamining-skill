@@ -42,8 +42,8 @@ at the first one (the workspace).
    `output_path`.
 4. **Verify.** Call `preview_result` on the output and compare against the summary
    (`records_written`, `duplicates_skipped`, `chunks_failed`, `first_error`). Personal data in
-   the rows is masked by default (`[EMAIL]`, `[IP]`, `[CARD]`, `[TCKN]`, `[IBAN]`, counted in
-   `pii_masked`), so check the shape and the counts, not the exact values. Do not try to
+   the rows is masked by default (`[EMAIL]`, `[IP]` for IPv4 and IPv6, `[CARD]`, `[TCKN]`, `[IBAN]`, and `[SECRET]` for
+   tokens, API keys and Bearer credentials, counted in `pii_masked`), so check the shape and the counts, not the exact values. Do not try to
    recover masked values, and tell the user if they need to see them: the operator can start
    the server with `--unmasked-preview`.
 5. **Report numbers, not data.** Tell the user the counts and a few example rows. Do not paste

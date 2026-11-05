@@ -8,6 +8,13 @@ All notable changes are recorded here. The format follows
 
 ### Security
 
+- **Masking now covers IPv6 addresses and secrets.** IPv6 addresses (full, with `::`, with an IPv4
+  tail) become `[IP]`; times, dates and `std::vector` are not mistaken for them. JSON Web Tokens,
+  AWS access key ids, GitHub, OpenAI/Anthropic and Slack tokens become `[SECRET]`, and so does the
+  value after `Bearer` when it is at least 20 characters, mixes two kinds of character and has a
+  Shannon entropy of 3.8 bits per character or more (`Bearer password` stays readable). Every
+  pattern is bounded and starts at a token boundary; megabyte-long hostile lines are masked in
+  under two seconds in the tests. Still best effort, not anonymisation.
 - **Custom patterns are vetted more strictly** (only offered with `--allow-custom-patterns`). A group
   that holds an unbounded repeat is now refused when it is repeated at all, so `(a+){2}` and
   `(a+){2,64}` join `(a+)+`, and so is a repeated group whose alternatives cannot be told apart by
