@@ -6,6 +6,33 @@ All notable changes are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-06
+
+The package's code is the same as in 0.4.0. This release corrects the documentation that comes with
+it.
+
+### Fixed
+
+- **README table.** The exit-code row for 141 had an unescaped pipe inside a code span, so GitHub cut
+  the row off in the middle of the sentence.
+- **README figures.** A quality check of a million CSV rows with six columns takes about 30 seconds
+  (the README still said 8, from before the streaming statistics) and half a million JSON Lines
+  records about 20. The README and `docs/troubleshooting.md` no longer call mining single-threaded
+  without saying that the library can use `max_workers` for little gain (at most about 1.2 times).
+  The distinct counts, number statistics and sampled previews are described in the README as well.
+
+### Added
+
+- **An overview diagram** at the top of the README (`docs/images/overview.webp`), included in the
+  source distribution.
+
+### Changed
+
+- Tests and CI only: the timing check that shows `(a|aa)+` is exponential takes the shortest of
+  several short runs, so a busy machine cannot fail it; CodeQL leaves `tests/` out of its scan,
+  because the tests hold regular expressions that are exponential on purpose, and still scans
+  `src/` and `scripts/`.
+
 ## [0.4.0] - 2026-11-05
 
 ### Security
