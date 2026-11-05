@@ -16,7 +16,9 @@
       "args": [
         "--from",
         "${CLAUDE_PLUGIN_ROOT}",
-        "datamining-skill",
+        "python",
+        "-m",
+        "datamining_skill",
         "mcp",
         "--allow-dir",
         "${CLAUDE_PROJECT_DIR}"

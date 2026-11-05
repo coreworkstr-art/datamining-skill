@@ -6,6 +6,14 @@ All notable changes are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Claude Code plugin did not connect on Windows with Smart App Control.** uvx makes an `.exe`
+  launcher for the command it runs, and the policy blocked it (`Failed to spawn: datamining-skill`,
+  `os error 4551`), so the server never started. The plugin now runs `python -m datamining_skill`,
+  which needs no launcher. Found by installing the plugin with the real Claude Code CLI in an isolated
+  configuration, which had not been possible before.
+
 ## [0.5.0] - 2026-11-06
 
 This release makes the tool accept the files people actually bring: plain text, address lists, mail

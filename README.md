@@ -210,6 +210,9 @@ Create `.cursor/mcp.json` in your project (or `~/.cursor/mcp.json` for all proje
   `"command": "/path/to/.venv/bin/python", "args": ["-m", "datamining_skill", "mcp", "--allow-dir", "..."]`.
 - In a JSON file, Windows paths need doubled backslashes (`"C:\\Users\\you\\data"`). Forward slashes
   work too.
+- If Windows says an Application Control policy blocked the program (`os error 4551`), start the
+  server through Python instead of the command: `"command": "python", "args": ["-m",
+  "datamining_skill", "mcp", "--allow-dir", "..."]`. The plugin already does.
 - You can repeat `--allow-dir`, or set `DATAMINING_SKILL_ALLOWED_DIRS` (paths separated by `;` on
   Windows, `:` elsewhere). With neither, the server uses its working directory, and refuses to if
   that is the filesystem root.

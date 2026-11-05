@@ -15,6 +15,14 @@ server with [uv](https://docs.astral.sh/uv/). Install uv, or skip the plugin and
 server by hand with a normal `pip install` (see the README: *Claude Code*, *Claude Desktop*,
 *Cursor*).
 
+**`Failed to spawn` with `Application Control policy` (`os error 4551`) on Windows.** Smart App
+Control, or a company's application policy, blocks programs it does not know, and uv makes a small
+`.exe` launcher for the command it installs or runs. The plugin avoids this by starting the server
+as `python -m datamining_skill`, which runs only the interpreter. If you start the server yourself
+and meet the error, do the same: after a `pip install`, use `"command": "python", "args": ["-m",
+"datamining_skill", "mcp", "--allow-dir", "..."]`, or with uv
+`uvx --from <the repository folder> python -m datamining_skill mcp --allow-dir ...`.
+
 **The server does not show up in the client.** Run the same command the client runs, in a
 terminal: `datamining-skill mcp --allow-dir /your/data`. It should wait silently for input
 (press Ctrl+D or Ctrl+Z to end it). Then run `python scripts/mcp_smoke_test.py`, which performs a

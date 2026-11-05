@@ -91,8 +91,12 @@ def test_the_plugin_manifest_matches_the_package() -> None:
     assert plugin["license"] == "MIT" and plugin["description"] and plugin["author"]["name"]
     server = plugin["mcpServers"]["datamining"]
     assert server["command"] == "uvx"
-    assert server["args"][:3] == ["--from", "${CLAUDE_PLUGIN_ROOT}", "datamining-skill"]
-    assert server["args"][3:] == ["mcp", "--allow-dir", "${CLAUDE_PROJECT_DIR}"]
+    # started as "python -m datamining_skill", not as the "datamining-skill" command: uvx would make an
+    # .exe launcher for that, and Windows with Smart App Control blocks it (os error 4551), so the
+    # server never connects; the interpreter is a program the system already trusts
+    assert server["args"][:2] == ["--from", "${CLAUDE_PLUGIN_ROOT}"]
+    assert server["args"][2:5] == ["python", "-m", "datamining_skill"]
+    assert server["args"][5:] == ["mcp", "--allow-dir", "${CLAUDE_PROJECT_DIR}"]
 
 
 def test_the_marketplace_lists_the_plugin_at_the_repository_root() -> None:
