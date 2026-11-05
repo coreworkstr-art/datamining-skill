@@ -92,12 +92,14 @@ writes `emails.csv` and prints a JSON summary:
 `quality` reads a CSV, TSV or JSON Lines file once and reports what is wrong with it: records that
 are malformed (a row with too few or too many columns, a broken quote, a line that is not JSON)
 with the first line numbers, how many values of each field are empty or missing, the types found in
-each field, and fields whose values change type (a column of numbers with a few words in it). It
-keeps counts and line numbers, never values, so its memory does not grow with the file. It checks
-up to 1,000,000 records by default (`--max-records`) and says whether it read the whole file. On a
-laptop it takes about 8 seconds for a million CSV rows with six columns, and about 3 seconds for
-half a million JSON Lines records. The file's format is detected first, so a file that is mostly
-broken is refused as "no supported format" before it can be checked.
+each field, and fields whose values change type (a column of numbers with a few words in it). Each
+field also gets an approximate count of its distinct values and, if it is numeric with at least ten
+values, its mean, spread and estimated quartiles. It keeps counts, line numbers and small summaries
+of fixed size, never values, so its memory does not grow with the file. It checks up to 1,000,000
+records by default (`--max-records`) and says whether it read the whole file. On a laptop it takes
+about 30 seconds for a million CSV rows with six columns, and about 20 seconds for half a million
+JSON Lines records. The file's format is detected first, so a file that is mostly broken is refused
+as "no supported format" before it can be checked.
 
 If `mine` is interrupted, run the same command again: it resumes where it stopped. Run it again
 after it finished and it says `already_complete` instead of doing the work twice. Changing any
@@ -111,11 +113,11 @@ standard input/output, so an assistant can inspect and mine local files on your 
 | Tool | What it does |
 | --- | --- |
 | `profile_dataset` | Format, encoding, columns or keys, size and estimated record count of a CSV, TSV, JSON, JSONL or log file; also gzip, bzip2, xz and zip files. Read-only. |
-| `check_quality` | Reads a CSV, TSV or JSON Lines file once and reports malformed records (by kind, with line numbers), empty or missing values per field, the value types found and schema drift. Counts and line numbers only, never values. Read-only. |
-| `mine_dataset` | Extracts data (e-mail addresses by default) into a `.csv` or `.jsonl` result in memory-bounded chunks with checkpoints. `unique`, `lowercase`, `csv_formula_guard` and `overwrite` options. With `wait=false` it runs in the background and returns a job id. |
+| `check_quality` | Reads a CSV, TSV or JSON Lines file once and reports malformed records (by kind, with line numbers), empty or missing values per field, the value types found and schema drift, plus an approximate distinct count per field and, for numeric fields, the mean, spread and quartiles. Counts, line numbers and aggregates only, never values. Read-only. |
+| `mine_dataset` | Extracts data (e-mail addresses by default) into a `.csv`, `.jsonl` or `.ndjson` result in memory-bounded chunks with checkpoints. `unique`, `lowercase`, `csv_formula_guard` and `overwrite` options. With `wait=false` it runs in the background and returns a job id. |
 | `mining_status` | Progress and result of a background run, or a list of the runs of this session. |
 | `cancel_mining` | Stops a background run after its current chunk; calling `mine_dataset` again resumes it. |
-| `preview_result` | The first records of a result file, so the assistant can verify the run. |
+| `preview_result` | The first records of a result file, or with `sample` a uniform sample from the whole file (repeatable with `seed`), so the assistant can verify the run. |
 
 Every argument is described in [docs/mcp-tools.md](docs/mcp-tools.md).
 
@@ -208,10 +210,10 @@ Create `.cursor/mcp.json` in your project (or `~/.cursor/mcp.json` for all proje
   affected: it uses bounded patterns, and the test suite runs it against hostile lines a megabyte
   long under a time limit.
 - What the assistant sees is masked. In `preview_result` rows and in the column names from
-  `profile_dataset`, e-mail addresses, IPv4 and IPv6 addresses, card numbers, T.C. kimlik numbers, IBANs and secrets (tokens, API keys)
-  become tags such as `[EMAIL]`. It is a best-effort safety net, not anonymisation (see
-  [docs/mcp-tools.md](docs/mcp-tools.md#masking-and-the-audit-log)), and `--unmasked-preview`
-  turns it off.
+  `profile_dataset`, e-mail addresses, IPv4 and IPv6 addresses, card numbers, T.C. kimlik numbers,
+  IBANs and secrets (tokens, API keys) become tags such as `[EMAIL]`. It is a best-effort safety
+  net, not anonymisation (see [docs/mcp-tools.md](docs/mcp-tools.md#masking-and-the-audit-log)),
+  and `--unmasked-preview` turns it off.
 - To keep a record of what the assistant did, pass `--audit-log /path/outside/your/data/audit.jsonl`.
   It gets one line per tool call with the time, the tool, paths and counts, and never any contents.
 - To test an installation without a client, run `python scripts/mcp_smoke_test.py`. It does a full
@@ -270,7 +272,7 @@ single `error:` line, never a Python traceback; add `--debug` to see the traceba
 | 3 | Unavailable source, invalid configuration, file-system error, low memory or disk, job already running, or another library error |
 | 4 | `mine` finished but some chunks failed (the first reason is printed); run again to retry them |
 | 130 | Interrupted (run the same command again to resume) |
-| 141 | The reader of stdout closed the pipe (for example `| head`) |
+| 141 | The reader of stdout closed the pipe (for example `\| head`) |
 
 A fresh run refuses to overwrite an existing output file that it did not create. State and
 scratch files live in `./.scratch/`; `datamining-skill clean` removes those of finished jobs and
@@ -414,8 +416,8 @@ so treat them as orders of magnitude.
 
 The built-in extraction looks for each `@` with a plain string search and runs the pattern only
 around it, so sparse text is read at close to disk speed; text with an address on every line is
-bound by the interpreter. Mining is single-threaded. See
-[docs/troubleshooting.md](docs/troubleshooting.md#speed) for what helps.
+bound by the interpreter. Mining runs on one thread by default ([Limitations](#limitations));
+[docs/troubleshooting.md](docs/troubleshooting.md#speed) says what helps.
 
 ## Guarantees
 
@@ -442,7 +444,10 @@ bound by the interpreter. Mining is single-threaded. See
 - A record is a physical line. A quoted CSV value that spans lines is searched line by line, and
   a record count of such a file is given in lines. There is no column targeting: to work on one
   column, write a pattern for that column's values.
-- Mining is single-threaded, about 15 to 25 MiB/s when every row has a match.
+- Mining runs on one thread, about 15 to 25 MiB/s when every row has a match. A library caller can
+  set `OrchestratorConfig(max_workers=...)` to mine chunks on several threads, but the work is
+  CPU-bound Python under the interpreter lock, so the gain measured was small (at most about 1.2
+  times). `--unique` mining, the command line and the MCP tools always use one thread.
 - Mining supports ASCII-compatible encodings (ASCII, UTF-8, cp1252, ISO-8859-1) directly, and
   UTF-16/32 through the conversion copy, which needs temporary disk space for the converted text.
 - The CLI, `run_mining` and the MCP tools hold a cross-process lock per job, so a second process
