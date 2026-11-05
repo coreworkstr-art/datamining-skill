@@ -16,11 +16,11 @@ network. They run through the `datamining` MCP server; its tools are listed belo
 | Tool | Use it to |
 | --- | --- |
 | `profile_dataset` | Inspect a file: format, encoding, columns or keys, size, estimated record count. Read-only and fast, whatever the size. |
-| `check_quality` | Read a CSV, TSV or JSON Lines file once and report malformed records (with line numbers), empty values per field, value types and schema drift. Counts only, never values. Read-only. Waits until done: it stops after `max_records` (default 1,000,000) and says whether it read everything. |
+| `check_quality` | Read a CSV, TSV or JSON Lines file once and report malformed records (with line numbers), empty values per field, value types and schema drift. Counts only, never values; per field it also gives an approximate distinct count and, for numeric fields with at least 10 values, the mean, spread and quartiles. Read-only. Waits until done: it stops after `max_records` (default 1,000,000) and says whether it read everything. |
 | `mine_dataset` | Extract data into a `.csv`, `.jsonl` or `.ndjson` result. Resumes an interrupted run when called again with the same arguments. |
 | `mining_status` | Check a background run by the `job_id` that `mine_dataset` returned with `wait=false`, or list all runs of this server session. |
 | `cancel_mining` | Stop a background run (by `job_id`) after its current chunk. Nothing is lost; call `mine_dataset` again to resume. |
-| `preview_result` | Read the first records of a result file (at most 256 KiB, up to 200 rows). |
+| `preview_result` | Read the first records of a result file (at most 256 KiB, up to 200 rows). With `sample: true` (and optionally a `seed`) it draws the records from across the whole file instead, so a result that changes along the way is not judged by its first rows alone. |
 
 File paths must lie inside the directories the server was started with. Relative paths start
 at the first one (the workspace).

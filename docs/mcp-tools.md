@@ -79,6 +79,9 @@ Returns, for example:
   "fields": [
     {"name": "age", "present": 999990, "missing": 0, "empty_or_null": 20000, "completeness": 0.98,
      "types": {"integer": 979989, "empty": 20000, "string": 1}, "dominant_type": "number",
+     "approx_distinct": 98, "uniqueness_ratio": 0.0001,
+     "numeric_stats": {"mean": 41.2, "stddev": 12.8, "skewness": 0.31, "excess_kurtosis": -0.2,
+                       "p25": 31.0, "median": 40.0, "p75": 51.0, "iqr": 20.0},
      "drift": true, "first_seen_line": {"integer": 2, "empty": 3, "string": 700002}}
   ],
   "issues": [
@@ -104,6 +107,17 @@ Returns, for example:
   count. `first_seen_line` says where each type first appeared, which is where to start looking.
 - `completeness` is the share of valid records with a real value; `missing` counts JSON records
   that lack the key altogether.
+- Each field also has `approx_distinct` (a HyperLogLog estimate, standard error about 6.5 %, never
+  above the number of non-empty values) and `uniqueness_ratio` (that divided by the non-empty
+  values). A field whose dominant type is `number` and that has at least 10 numeric values has
+  `numeric_stats`: `mean`, `stddev`, `skewness`, `excess_kurtosis` and the estimated quartiles
+  `p25`, `median`, `p75` and `iqr` (P² estimates); otherwise it is null. They come from fixed-size
+  accumulators that never keep a value, and the exact smallest and largest value are not reported,
+  because each is a cell of the file. The quartiles are estimates, and a median may happen to equal
+  one of the values. P² is less accurate on a column that is sorted or drifts steadily.
+- These statistics are what makes a check slow: measured on a laptop, about 1 MiB/s on a file of
+  mostly numbers and about 2 MiB/s on one of text, so a million rows of a dozen columns take a
+  minute or two. `max_records` bounds the time.
 - An `encoding` with a confidence below 0.9 is a guess (the file is not valid UTF-8) and comes
   with a first entry in `issues`. `undecodable_lines` counts lines with bytes that the detected
   encoding could not decode.
@@ -208,6 +222,8 @@ changes nothing.
 | --- | --- | --- | --- |
 | `path` | string, required | | A result file (`.csv`, `.jsonl` or `.ndjson`) |
 | `rows` | integer | 20 | Records to return, 1 to 200 |
+| `sample` | boolean | false | Draw the records uniformly from the file instead of taking the first ones |
+| `seed` | integer | | 0 to 2,147,483,647; makes a `sample` repeatable |
 
 ```json
 {
@@ -223,6 +239,13 @@ so any size is safe. The rows are the mined data: handle them as you would the s
 By default the rows are [masked](#masking-and-the-audit-log): the example above shows what a
 result of e-mail addresses looks like, and `pii_masked` counts the replacements per kind. The
 result file itself is never changed.
+
+**Sampling.** With `sample: true` the records are drawn uniformly from the file by reservoir
+sampling (Vitter's Algorithm R), in memory proportional to `rows`, and come back in file order,
+with `"sampled": true` and `"records_sampled_from"` (how many candidate records were seen). It
+reads at most the first 64 MiB, so a larger file is sampled from its beginning and `has_more` is
+true. A line over 1 MiB, a CSV value over 128 KiB and a record over 16 KiB are not candidates
+(counted in `skipped_too_long`). The same `seed` gives the same rows. Rows are masked as usual.
 
 ## Masking and the audit log
 

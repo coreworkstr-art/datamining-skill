@@ -249,3 +249,108 @@ def test_a_platform_that_cannot_report_free_memory_is_still_quiet(
 
     assert main(["mine", str(state_dir / "in.csv"), str(state_dir / "b.csv"), "--workspace", str(state_dir), "--log-level", "INFO"]) == 0
     assert '"event":"chunking.memory_unavailable"' in capsys.readouterr().err
+
+
+# ------------------------------------------------------------------ sampling
+
+
+def write_numbered_csv(path: Path, count: int) -> None:
+    path.write_text("n,note\n" + "".join(f"{n},row {n}\n" for n in range(count)), encoding="utf-8")
+
+
+def test_a_sample_is_reproducible_ordered_and_reaches_beyond_the_first_rows(state_dir: Path) -> None:
+    write_numbered_csv(state_dir / "r.csv", 500)
+
+    first = preview_result(state_dir / "r.csv", rows=10, sample=True, seed=42)
+    again = preview_result(state_dir / "r.csv", rows=10, sample=True, seed=42)
+    other = preview_result(state_dir / "r.csv", rows=10, sample=True, seed=43)
+
+    assert first == again
+    assert first["rows"] != other["rows"]
+    numbers = [int(row[0]) for row in first["rows"]]
+    assert numbers == sorted(numbers) and len(set(numbers)) == 10
+    assert max(numbers) >= 10  # not only the head of the file
+    assert first["columns"] == ["n", "note"]
+    assert first["sampled"] is True and first["records_sampled_from"] == 500
+    assert first["rows_returned"] == 10 and first["has_more"] is True
+    assert all(row[1] == f"row {row[0]}" for row in first["rows"])
+
+
+def test_sampling_is_roughly_uniform_over_the_file(state_dir: Path) -> None:
+    write_numbered_csv(state_dir / "r.csv", 500)
+    hits = [0] * 5  # a fifth of the file each
+    for seed in range(200):
+        for row in preview_result(state_dir / "r.csv", rows=10, sample=True, seed=seed)["rows"]:
+            hits[int(row[0]) // 100] += 1
+
+    assert all(300 < count < 500 for count in hits), hits  # 400 expected in each
+
+
+def test_a_file_smaller_than_the_sample_is_returned_whole(state_dir: Path) -> None:
+    write_numbered_csv(state_dir / "r.csv", 4)
+
+    shown = preview_result(state_dir / "r.csv", rows=10, sample=True, seed=1)
+
+    assert [row[0] for row in shown["rows"]] == ["0", "1", "2", "3"]
+    assert shown["has_more"] is False and shown["records_sampled_from"] == 4
+
+
+def test_a_sample_keeps_multiline_csv_records_together_and_skips_huge_ones(state_dir: Path) -> None:
+    (state_dir / "r.csv").write_text(
+        'id,note\n1,"two\nlines"\n2,' + "x" * 30_000 + '\n3,"a ""quoted"" one"\n', encoding="utf-8"
+    )
+
+    shown = preview_result(state_dir / "r.csv", rows=10, sample=True, seed=0)
+
+    assert shown["rows"] == [["1", "two\nlines"], ["3", 'a "quoted" one']]
+    assert shown["skipped_too_long"] == 1 and shown["records_sampled_from"] == 2
+
+
+def test_a_jsonl_sample_is_ordered_masked_and_keeps_bad_lines_as_text(state_dir: Path) -> None:
+    lines = [json.dumps({"n": n, "mail": f"user{n}@internal.corp.test"}) for n in range(300)]
+    lines[150] = "not json"
+    (state_dir / "r.jsonl").write_text("\n".join(lines) + "\n\n", encoding="utf-8")
+
+    shown = preview_result(state_dir / "r.jsonl", rows=20, sample=True, seed=5, mask=True)
+    again = preview_result(state_dir / "r.jsonl", rows=20, sample=True, seed=5, mask=True)
+
+    assert shown == again
+    assert shown["format"] == "jsonl" and shown["sampled"] is True and shown["records_sampled_from"] == 300
+    objects = [row for row in shown["rows"] if isinstance(row, dict)]
+    assert all(row["mail"] == "[EMAIL]" for row in objects)
+    numbers = [row["n"] for row in objects]
+    assert numbers == sorted(numbers) and max(numbers) > 20
+    assert shown["pii_masked"] == {"EMAIL": len(objects)}
+
+
+def test_sampled_csv_rows_are_masked(state_dir: Path) -> None:
+    (state_dir / "r.csv").write_text(
+        "email\n" + "".join(f"user{n}@internal.corp.test\n" for n in range(100)), encoding="utf-8"
+    )
+
+    shown = preview_result(state_dir / "r.csv", rows=5, sample=True, seed=2, mask=True)
+
+    assert shown["rows"] == [["[EMAIL]"]] * 5 and shown["pii_masked"] == {"EMAIL": 5}
+
+
+def test_a_sample_stops_at_the_scan_budget(state_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from datamining_skill.infrastructure import result_preview
+
+    write_numbered_csv(state_dir / "r.csv", 5000)
+    monkeypatch.setattr(result_preview, "_MAX_SAMPLE_SCAN_BYTES", 10_000)
+
+    shown = preview_result(state_dir / "r.csv", rows=5, sample=True, seed=1)
+
+    assert shown["has_more"] is True and shown["scan_stopped_at_bytes"] >= 10_000
+    assert 0 < shown["records_sampled_from"] < 1500
+
+
+def test_the_command_line_samples_with_a_seed(state_dir: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    write_numbered_csv(state_dir / "r.csv", 300)
+
+    assert main(["preview", str(state_dir / "r.csv"), "--rows", "5", "--sample", "--seed", "9"]) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert main(["preview", str(state_dir / "r.csv"), "--rows", "5", "--sample", "--seed", "9"]) == 0
+    second = json.loads(capsys.readouterr().out)
+
+    assert first == second and first["sampled"] is True and first["rows_returned"] == 5

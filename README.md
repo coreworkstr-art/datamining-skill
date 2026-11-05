@@ -232,7 +232,7 @@ datamining-skill mine SOURCE OUTPUT [--workspace DIR] [--unique] [--lowercase]
                                     [--pattern REGEX [--fields a,b]] [--overwrite]
                                     [--csv-formula-guard] [--json-escapes {auto,on,off}]
                                     [--max-expanded-gib GIB] [--no-progress]
-datamining-skill preview PATH [--rows N] [--mask]
+datamining-skill preview PATH [--rows N] [--mask] [--sample [--seed N]]
 datamining-skill clean [--workspace DIR] [--all] [--dry-run]
 datamining-skill mcp [--allow-dir DIR ...] [--allow-custom-patterns]
                      [--unmasked-preview] [--audit-log FILE]
@@ -251,6 +251,8 @@ datamining-skill mcp [--allow-dir DIR ...] [--allow-custom-patterns]
 | `--workspace` | Where the `.scratch/` folder with state and scratch files lives (default: the current directory). |
 | `--rows` | How many records `preview` shows (1 to 200, default 20). |
 | `--max-records` | `quality` stops after this many records (default 1,000,000) and says whether it read the whole file. |
+| `--sample` | `preview` draws its records from across the whole file (the first 64 MiB at most) instead of taking the first ones. |
+| `--seed` | Makes `preview --sample` repeatable. |
 | `--mask` | `preview` and `quality` replace e-mail, IP, card, T.C. kimlik and IBAN numbers and secrets by tags such as `[EMAIL]`. |
 | `--unmasked-preview` | `mcp` returns preview rows and profile column names as they are. By default they are masked. |
 | `--audit-log` | `mcp` appends one JSON line per tool call (never contents) to this file, which must lie outside the allowed directories. |

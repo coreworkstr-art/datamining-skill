@@ -53,6 +53,18 @@ All notable changes are recorded here. The format follows
   an archive announcing more than 16 entries or a directory over 64 KiB (also through the ZIP64
   records) is refused with a plain message.
 
+### Added
+
+- **Streaming statistics in `check_quality`.** Every field reports `approx_distinct` and
+  `uniqueness_ratio` (HyperLogLog, standard error about 6.5 %), and a numeric field with at least ten
+  values reports `numeric_stats`: mean, standard deviation, skewness, excess kurtosis and estimated
+  quartiles. They come from fixed-size one-pass accumulators (`application/stream_statistics.py`), no
+  value is kept, and the exact minimum and maximum are deliberately not reported. A quality check is
+  now several times slower (about 1 to 2 MiB/s); `max_records` bounds it.
+- **Sampling in `preview_result`.** `sample` (MCP, `preview --sample`) draws the rows uniformly from
+  the file by reservoir sampling instead of taking the first ones, in file order, from at most the
+  first 64 MiB; `seed` makes it repeatable.
+
 ### Changed
 
 - **The CSV field limit is no longer put back.** `csv.field_size_limit` is a setting of the whole

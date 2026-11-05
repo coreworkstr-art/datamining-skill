@@ -609,3 +609,33 @@ def test_the_command_line_refuses_an_audit_log_inside_the_workspace(
 
     assert code == 3
     assert "outside the allowed directories" in capsys.readouterr().err
+
+
+def test_the_server_samples_previews_and_masks_the_sample(state_dir: Path, audit_file: Path) -> None:
+    write_source(state_dir)
+    client = Client(create_mcp_server([state_dir], audit_log=audit_file))
+    client.handshake_and(call(2, "mine_dataset", {"path": "contacts.csv", "output_path": "found.csv"}))
+
+    (first,) = client.handshake_and(call(3, "preview_result", {"path": "found.csv", "rows": 5, "sample": True, "seed": 4}))
+    (again,) = client.handshake_and(call(4, "preview_result", {"path": "found.csv", "rows": 5, "sample": True, "seed": 4}))
+    (plain,) = client.handshake_and(call(5, "preview_result", {"path": "found.csv", "rows": 5}))
+
+    shown = structured(first)
+    assert shown == structured(again)
+    assert shown["sampled"] is True and shown["records_sampled_from"] == 39 and shown["rows_returned"] == 5
+    assert shown["rows"] == [["[EMAIL]"]] * 5 and shown["pii_masked"] == {"EMAIL": 5}
+    assert "sampled" not in structured(plain)  # the default is unchanged
+    sampled_calls = [r for r in records(audit_file) if r.get("sample") is True]
+    assert len(sampled_calls) == 2 and sampled_calls[0]["sampled"] is True
+    assert sampled_calls[0]["records_sampled_from"] == 39
+    assert "seed" not in sampled_calls[0]
+
+
+@pytest.mark.parametrize("arguments", [{"seed": -1}, {"seed": 2**31}, {"sample": "yes"}, {"seed": True}])
+def test_the_server_refuses_a_bad_sample_argument(state_dir: Path, arguments: dict[str, Any]) -> None:
+    write_source(state_dir)
+    client = Client(create_mcp_server([state_dir]))
+
+    (response,) = client.handshake_and(call(2, "preview_result", {"path": "contacts.csv", **arguments}))
+
+    assert response["result"]["isError"] is True

@@ -6,6 +6,8 @@ import bz2
 import csv
 import gzip
 import json
+import random
+import statistics
 import threading
 from pathlib import Path
 from typing import Any
@@ -22,6 +24,12 @@ from datamining_skill.application.data_quality import (
     unique_names,
 )
 from datamining_skill.application.record_formats import CsvFormatter
+from datamining_skill.application.stream_statistics import (
+    HyperLogLogSketch,
+    OnlineMoments,
+    P2QuantileEstimator,
+    QuantileSummary,
+)
 from datamining_skill.cli import main
 from datamining_skill.domain.models import TextLine
 from datamining_skill.infrastructure.handlers.csv_handler import CsvHandler
@@ -536,3 +544,178 @@ def test_the_shared_csv_field_limit_is_raised_and_left_raised(state_dir: Path) -
         assert csv.field_size_limit() >= 4 * 1024 * 1024  # both raised it, and neither put 200 000 back
     finally:
         csv.field_size_limit(previous)
+
+
+# ------------------------------------------------------------------ streaming statistics
+
+
+def test_online_moments_match_the_standard_library() -> None:
+    rng = random.Random(7)
+    values = [rng.gauss(50, 10) for _ in range(500)] + [rng.expovariate(0.2) for _ in range(500)]
+    moments = OnlineMoments()
+    for value in values:
+        moments.update(value)
+
+    result = moments.to_dict()
+
+    assert result["mean"] == pytest.approx(statistics.mean(values), abs=1e-4)
+    assert result["stddev"] == pytest.approx(statistics.stdev(values), abs=1e-4)
+    centred = [v - statistics.mean(values) for v in values]
+    m2 = sum(c**2 for c in centred) / len(values)
+    assert result["skewness"] == pytest.approx((sum(c**3 for c in centred) / len(values)) / m2**1.5, abs=1e-3)
+    assert result["excess_kurtosis"] == pytest.approx((sum(c**4 for c in centred) / len(values)) / m2**2 - 3, abs=1e-3)
+
+
+def test_online_moments_survive_a_large_offset() -> None:
+    """The textbook sum of squares loses every digit of values like 1 000 000 000 + x."""
+    rng = random.Random(3)
+    noise = [rng.gauss(0, 2) for _ in range(5000)]
+    moments = OnlineMoments()
+    for value in noise:
+        moments.update(1e9 + value)
+
+    result = moments.to_dict()
+
+    assert result["stddev"] == pytest.approx(statistics.stdev(noise), abs=1e-4)
+    assert result["mean"] == pytest.approx(1e9 + statistics.mean(noise), abs=1e-3)
+
+
+def test_online_moments_ignore_nan_and_infinity_and_report_what_is_defined() -> None:
+    moments = OnlineMoments()
+    assert moments.to_dict() == {"mean": 0.0, "stddev": None, "skewness": None, "excess_kurtosis": None}
+    for value in (float("nan"), float("inf"), -float("inf")):
+        moments.update(value)
+    assert moments.count == 0
+    moments.update(4.0)
+    moments.update(4.0)
+    moments.update(4.0)
+    moments.update(4.0)
+
+    assert moments.to_dict() == {"mean": 4.0, "stddev": 0.0, "skewness": None, "excess_kurtosis": None}
+
+
+def test_quantile_summary_is_close_on_2000_numbers() -> None:
+    rng = random.Random(11)
+    values = [rng.gauss(100, 15) for _ in range(2000)]
+    summary = QuantileSummary()
+    for value in values:
+        summary.update(value)
+    exact = statistics.quantiles(values, n=4, method="inclusive")
+
+    result = summary.to_dict()
+
+    assert set(result) == {"p25", "median", "p75", "iqr"}
+    assert result["p25"] == pytest.approx(exact[0], abs=1.5)
+    assert result["median"] == pytest.approx(exact[1], abs=1.5)
+    assert result["p75"] == pytest.approx(exact[2], abs=1.5)
+    assert result["iqr"] == pytest.approx(exact[2] - exact[0], abs=2.5)
+
+
+def test_quantiles_of_sorted_and_repeated_input() -> None:
+    ascending = P2QuantileEstimator(0.5)
+    for n in range(1, 1002):
+        ascending.update(float(n))
+    constant = P2QuantileEstimator(0.5)
+    for _ in range(100):
+        constant.update(7.0)
+
+    assert ascending.value() == pytest.approx(501, abs=10)
+    assert constant.value() == 7.0
+    assert P2QuantileEstimator(0.5).value() is None
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        P2QuantileEstimator(1.0)
+
+
+def test_hyperloglog_counts_small_sets_closely_and_nothing_as_zero() -> None:
+    assert HyperLogLogSketch().estimate() == 0
+    for size in (1, 2, 10, 50):
+        sketch = HyperLogLogSketch()
+        for n in range(size):
+            sketch.add(f"value {n}".encode())
+            sketch.add(f"value {n}".encode())  # repeats do not count
+        assert abs(sketch.estimate() - size) <= max(1, size * 0.12), size
+
+
+def test_hyperloglog_is_within_its_error_on_5000_distinct_items() -> None:
+    """With 256 registers the standard error is 6.5 %: a single set is held to three of them, the mean of many to 5 %."""
+    errors = []
+    for trial in range(20):
+        sketch = HyperLogLogSketch()
+        for n in range(5000):
+            sketch.add(f"item-{trial}-{n}".encode())
+        errors.append(sketch.estimate() / 5000 - 1)
+
+    assert all(abs(error) < 0.20 for error in errors)
+    assert abs(statistics.mean(errors)) < 0.05
+
+
+def test_the_sketches_have_a_fixed_size() -> None:
+    sketch = HyperLogLogSketch()
+    for n in range(50_000):
+        sketch.add(str(n).encode())
+    assert len(sketch._registers) == 256
+
+
+def test_quality_report_has_distinct_counts_and_number_statistics() -> None:
+    rows = "".join(f"{n},{n % 5},name{n},{n * 1.5}\n" for n in range(50))
+    path_text = "id,bucket,name,price\n" + rows
+    accumulator = QualityAccumulator("csv")
+    accumulator.set_columns(["id", "bucket", "name", "price"])
+    for line, row in enumerate(path_text.splitlines()[1:], 2):
+        accumulator.add_row(line, row.split(","))
+    fields = {f["name"]: f for f in accumulator.report()["fields"]}
+
+    assert fields["id"]["approx_distinct"] == pytest.approx(50, abs=6)
+    assert fields["id"]["uniqueness_ratio"] == pytest.approx(1.0, abs=0.12)
+    assert fields["bucket"]["approx_distinct"] == 5
+    assert fields["bucket"]["uniqueness_ratio"] == 0.1
+    assert fields["id"]["numeric_stats"]["mean"] == 24.5
+    assert fields["id"]["numeric_stats"]["median"] == pytest.approx(24.5, abs=3)
+    assert fields["price"]["numeric_stats"]["mean"] == pytest.approx(36.75)
+    assert fields["name"]["numeric_stats"] is None  # a string column has none
+    assert fields["name"]["dominant_type"] == "string"
+
+
+def test_number_statistics_need_ten_numeric_values(state_dir: Path) -> None:
+    (state_dir / "few.csv").write_text("n,s\n" + "".join(f"{i},x{i}\n" for i in range(9)), encoding="utf-8")
+    (state_dir / "ten.csv").write_text("n,s\n" + "".join(f"{i},x{i}\n" for i in range(10)), encoding="utf-8")
+
+    few = {f["name"]: f for f in check_quality(state_dir / "few.csv")["fields"]}
+    ten = {f["name"]: f for f in check_quality(state_dir / "ten.csv")["fields"]}
+
+    assert few["n"]["numeric_stats"] is None
+    assert ten["n"]["numeric_stats"] is not None and ten["n"]["numeric_stats"]["mean"] == 4.5
+    assert ten["s"]["numeric_stats"] is None
+
+
+def test_json_lines_get_the_same_statistics(state_dir: Path) -> None:
+    lines = [json.dumps({"id": n, "score": n / 4, "tag": f"t{n % 3}", "code": str(n)}) for n in range(60)]
+    (state_dir / "data.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    fields = {f["name"]: f for f in check_quality(state_dir / "data.jsonl")["fields"]}
+
+    assert fields["id"]["numeric_stats"]["mean"] == 29.5
+    assert fields["score"]["numeric_stats"]["mean"] == pytest.approx(7.375)
+    assert fields["tag"]["approx_distinct"] == 3 and fields["tag"]["numeric_stats"] is None
+    assert fields["code"]["numeric_stats"] is None  # a string that looks like a number stays a string
+
+
+def test_a_field_that_is_mostly_text_gets_no_number_statistics(state_dir: Path) -> None:
+    body = "".join(f"{i}\n" for i in range(12)) + "".join(f"word{i}\n" for i in range(30))
+    (state_dir / "mixed.csv").write_text("v,w\n" + "".join(f"{line.strip()},1\n" for line in body.splitlines()), encoding="utf-8")
+
+    fields = {f["name"]: f for f in check_quality(state_dir / "mixed.csv")["fields"]}
+
+    assert fields["v"]["dominant_type"] == "string" and fields["v"]["numeric_stats"] is None
+
+
+def test_the_exact_smallest_and_largest_values_are_never_reported(state_dir: Path) -> None:
+    marker = 987654.321
+    values = [marker] + [float(n) for n in range(1, 40)]
+    (state_dir / "m.csv").write_text("x,y\n" + "".join(f"{v},1\n" for v in values), encoding="utf-8")
+
+    report = check_quality(state_dir / "m.csv")
+    stats = next(f for f in report["fields"] if f["name"] == "x")["numeric_stats"]
+
+    assert set(stats) == {"mean", "stddev", "skewness", "excess_kurtosis", "p25", "median", "p75", "iqr"}
+    assert "987654.321" not in json.dumps(report)

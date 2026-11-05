@@ -200,6 +200,17 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="replace e-mail, IP, card, T.C. kimlik and IBAN numbers and secrets by tags such as [EMAIL]",
     )
+    preview.add_argument(
+        "--sample",
+        action="store_true",
+        help="draw the records uniformly from the whole file (reservoir sampling) instead of taking the first ones",
+    )
+    preview.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="random seed that makes --sample repeatable",
+    )
     _add_logging_options(preview, default_level="WARNING")
 
     clean = commands.add_parser(
@@ -365,7 +376,8 @@ def _run_preview(args: argparse.Namespace) -> int:
         raise InvalidConfigurationException("the result file must end in .csv, .jsonl or .ndjson")
     if not result.is_file():
         raise InvalidConfigurationException("the result path does not name an existing file")
-    json.dump(preview_result(result, args.rows, mask=args.mask), sys.stdout, indent=2)
+    shown = preview_result(result, args.rows, mask=args.mask, sample=args.sample, seed=args.seed)
+    json.dump(shown, sys.stdout, indent=2)
     sys.stdout.write("\n")
     return 0
 

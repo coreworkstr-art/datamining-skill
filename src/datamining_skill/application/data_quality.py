@@ -4,20 +4,31 @@
 file of any size is checked in constant memory: at most ``MAX_TRACKED_FIELDS`` fields are
 followed, each with one counter per value type and the first line each type appeared on. It
 reports malformed records, how complete each field is, and *schema drift*, a field whose values
-are of different types. It never stores a value, only counts and line numbers
-(docs/architecture.md, "Data quality").
+are of different types. It never stores a value, only counts, line numbers and fixed-size sketches
+of a field (an approximate distinct count, and for numeric fields the mean, spread and quartiles of
+at least ten observations). The exact smallest and largest value are never reported, because each is
+a cell of the file (docs/architecture.md, "Data quality").
 """
 
 from __future__ import annotations
 
+import json
+import math
 import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from datamining_skill.application.stream_statistics import (
+    HyperLogLogSketch,
+    OnlineMoments,
+    QuantileSummary,
+)
+
 MAX_TRACKED_FIELDS = 512
 MAX_EXAMPLES = 5
 MAX_ISSUES = 25
+MIN_NUMERIC_OBSERVATIONS = 10  # fewer numbers than this and the statistics would describe single rows
 
 EMPTY = "empty"
 NULL = "null"
@@ -96,18 +107,47 @@ def unique_names(names: Sequence[str]) -> list[str]:
     return result
 
 
+def _canonical_bytes(raw_value: object) -> bytes | None:
+    """A value as the bytes that are hashed to count distinct values; None if it has none."""
+    if isinstance(raw_value, str):
+        return raw_value.strip().encode("utf-8", errors="replace")
+    try:
+        return json.dumps(raw_value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    except (TypeError, ValueError, RecursionError):
+        return None
+
+
 class _FieldStats:
-    __slots__ = ("first_line", "types")
+    """Counters and fixed-size sketches for one field; the moments and quartiles start with the first number."""
+
+    __slots__ = ("first_line", "hll", "moments", "quantiles", "types")
 
     def __init__(self) -> None:
         self.types: Counter[str] = Counter()
         self.first_line: dict[str, int] = {}
+        self.hll = HyperLogLogSketch()
+        self.moments: OnlineMoments | None = None
+        self.quantiles: QuantileSummary | None = None
 
-    def add(self, kind: str, line: int) -> None:
+    def add(self, kind: str, line: int, raw_value: object = None) -> None:
         self.types[kind] += 1
         if kind not in self.first_line:
             self.first_line[kind] = line
-
+        if kind in _NULL_KINDS or raw_value is None:
+            return
+        encoded = _canonical_bytes(raw_value)
+        if encoded is not None:
+            self.hll.add(encoded)
+        if kind in (INTEGER, FLOAT) and isinstance(raw_value, int | float | str):
+            try:
+                number = float(raw_value)
+            except (ValueError, OverflowError):
+                return
+            if math.isfinite(number):
+                if self.moments is None or self.quantiles is None:
+                    self.moments, self.quantiles = OnlineMoments(), QuantileSummary()
+                self.moments.update(number)
+                self.quantiles.update(number)
 
 class QualityAccumulator:
     """Counts what a stream of records looks like; see the module docstring."""
@@ -153,7 +193,7 @@ class QualityAccumulator:
         self.valid += 1
         tracked = min(expected, MAX_TRACKED_FIELDS)
         for index in range(tracked):
-            self._fields[self._columns[index]].add(classify_text(row[index]), line)
+            self._fields[self._columns[index]].add(classify_text(row[index]), line, row[index])
         self.untracked_values += expected - tracked
 
     def add_object(self, line: int, record: Mapping[str, Any]) -> None:
@@ -166,7 +206,7 @@ class QualityAccumulator:
                     self.untracked_values += 1
                     continue
                 stats = self._fields[key] = _FieldStats()
-            stats.add(classify_json(value), line)
+            stats.add(classify_json(value), line, value)
 
     def report(self) -> dict[str, Any]:
         """The findings as a JSON-serialisable dictionary."""
@@ -221,6 +261,17 @@ class QualityAccumulator:
             if kind not in _NULL_KINDS:
                 groups[_GROUP.get(kind, kind)] += count
         drift = len(groups) > 1
+        non_null = present - nulls
+        approx_distinct = min(stats.hll.estimate(), non_null) if non_null > 0 else 0
+        dominant_type = groups.most_common(1)[0][0] if groups else None
+        numeric_stats: dict[str, float | None] | None = None
+        if (
+            dominant_type == "number"
+            and stats.moments is not None
+            and stats.quantiles is not None
+            and stats.moments.count >= MIN_NUMERIC_OBSERVATIONS
+        ):
+            numeric_stats = {**stats.moments.to_dict(), **stats.quantiles.to_dict()}
         entry: dict[str, Any] = {
             "name": name,
             "present": present,
@@ -228,7 +279,10 @@ class QualityAccumulator:
             "empty_or_null": nulls,
             "completeness": round(1 - (nulls + missing) / self.valid, 4) if self.valid else None,
             "types": dict(stats.types.most_common()),
-            "dominant_type": groups.most_common(1)[0][0] if groups else None,
+            "dominant_type": dominant_type,
+            "approx_distinct": approx_distinct,
+            "uniqueness_ratio": round(approx_distinct / non_null, 4) if non_null > 0 else None,
+            "numeric_stats": numeric_stats,
             "drift": drift,
             "first_seen_line": dict(stats.first_line),
         }

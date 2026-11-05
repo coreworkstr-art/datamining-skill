@@ -600,7 +600,7 @@ and adds no data-processing logic of its own.
                   │ wait=false          (in the foreground, or on a MiningJobs thread)
                   ▼
               mining_status / cancel_mining ─▶ MiningJobs
-              preview_result ──▶ preview_result(...)  (reads at most 256 KiB)
+              preview_result ──▶ preview_result(...)  (at most 256 KiB; sample: reservoir over 64 MiB)
 ```
 
 | Module | Responsibility |
@@ -612,6 +612,7 @@ and adds no data-processing logic of its own.
 | `infrastructure/audit_log.py` | `AuditLog`: the append-only record of tool calls, outside the allowed directories. |
 | `application/pii_mask.py` | Best-effort masking of e-mail, IP, card, T.C. kimlik and IBAN numbers and secrets in what the assistant is shown. |
 | `application/data_quality.py`, `infrastructure/quality_scan.py` | The `check_quality` statistics and the single pass over a CSV or JSON Lines file that feeds them. |
+| `application/stream_statistics.py` | One-pass moments, P² quartiles and a HyperLogLog sketch: fixed size, no value kept. |
 | `bootstrap.py` | `run_mining` (state/scratch layout, resume, overwrite, conversion, finished-job answer), `profile_source`, `check_quality` and `create_mcp_server`; shared by the CLI and the MCP tools. |
 | `cli.py` | `profile`, `quality`, `mine`, `preview`, `clean` and `mcp` commands; exit codes; allowed-directory resolution; the progress line. |
 
@@ -628,7 +629,12 @@ so a broken quote is an error and not silently accepted; JSON Lines through `jso
 line each type appeared on, plus counters for malformed kinds and the first five example lines.
 It stores no value, so the report cannot leak data and memory does not grow with the file.
 A malformed CSV row is left out of the field statistics because its cells cannot be matched to
-columns. A compressed source is checked through the same temporary sample as `profile`, 64 MiB
+columns. Each field also carries three fixed-size sketches (`application/stream_statistics.py`): a
+256-register HyperLogLog for the number of distinct values and, from its first number on, one-pass
+moments (Welford and Pébay) and P² quartile estimators. They take a few kilobytes per field
+whatever the file's size and report only aggregates: `numeric_stats` appears for a numeric field
+with at least ten values, and the exact minimum and maximum are never reported. A compressed
+source is checked through the same temporary sample as `profile`, 64 MiB
 instead of 4. The statistics are about the records read: with `max_records` the report says that
 it stopped.
 

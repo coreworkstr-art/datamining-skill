@@ -56,6 +56,8 @@ _AUDIT_COUNTS = frozenset(
         "chunks_total",
         "oversized_lines",
         "rows_returned",
+        "sampled",
+        "records_sampled_from",
         "has_more",
         "status",
         "job_id",
@@ -294,6 +296,20 @@ def _preview_schema() -> dict[str, Any]:
                 "maximum": MAX_PREVIEW_ROWS,
                 "default": DEFAULT_PREVIEW_ROWS,
                 "description": "How many records to return.",
+            },
+            "sample": {
+                "type": "boolean",
+                "default": False,
+                "description": (
+                    "Sample records uniformly across the file (reservoir sampling, at most its first 64 MiB) "
+                    "instead of reading only the first rows. Rows come back in file order."
+                ),
+            },
+            "seed": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2147483647,
+                "description": "Optional random seed for reproducible reservoir sampling when sample is true.",
             },
         },
         "required": ["path"],
@@ -634,7 +650,7 @@ class MiningTools:
                     fields[key] = self._policy.display(self._policy.resolve(arguments[key], key))
                 except ToolInputError:
                     fields[key] = "<rejected>"
-        for key in ("unique", "lowercase", "overwrite", "csv_formula_guard", "wait"):
+        for key in ("unique", "lowercase", "overwrite", "csv_formula_guard", "wait", "sample"):
             if isinstance(arguments.get(key), bool):
                 fields[key] = arguments[key]
         if "pattern" in arguments:
@@ -711,7 +727,9 @@ class MiningTools:
         if path.suffix.lower() not in _RESULT_SUFFIXES:
             raise ToolInputError("'path' must be a .csv, .jsonl or .ndjson result file")
         rows = arguments.get("rows", DEFAULT_PREVIEW_ROWS)
-        return ToolOutcome(data=preview_result(path, rows, mask=self._mask))
+        sample = arguments.get("sample", False) is True
+        seed = arguments.get("seed") if sample else None
+        return ToolOutcome(data=preview_result(path, rows, mask=self._mask, sample=sample, seed=seed))
 
     def _run_status(self, arguments: Mapping[str, Any]) -> ToolOutcome:
         job_id = arguments.get("job_id")
