@@ -6,6 +6,12 @@ All notable changes are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-06
+
+This release makes the tool accept the files people actually bring: plain text, address lists, mail
+and web pages are read instead of refused, the first address of a list without a header row is
+kept, Turkish text is read correctly, and a quality check answers before a client gives up on it.
+
 ### Fixed
 
 - **A list without a header row lost its first address.** A table whose first row held short names
