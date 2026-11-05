@@ -93,8 +93,9 @@ compressed and only its first 64 MiB were read.
 
 A rough guide, on a laptop-class machine with an SSD: a log file with an address every few
 kilobytes is mined at 200 MiB/s or more; a CSV with an address on every row at 15 to 25 MiB/s.
-The work is single-threaded and bound by the interpreter, so a faster disk does not help much
-once the rows are dense. What does:
+The work runs on one thread and is bound by the interpreter (a library caller can use more, but
+the gain is small, see the README's Limitations), so a faster disk does not help much once the
+rows are dense. What does:
 
 - Keep the source and the workspace on a **local** disk.
 - On Windows, exclude the workspace's `.scratch` folder from real-time antivirus scanning if it

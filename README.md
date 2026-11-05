@@ -447,7 +447,7 @@ bound by the interpreter. Mining runs on one thread by default ([Limitations](#l
 - Mining runs on one thread, about 15 to 25 MiB/s when every row has a match. A library caller can
   set `OrchestratorConfig(max_workers=...)` to mine chunks on several threads, but the work is
   CPU-bound Python under the interpreter lock, so the gain measured was small (at most about 1.2
-  times). `--unique` mining, the command line and the MCP tools always use one thread.
+  times). Unique mining, the command line and the MCP tools always mine one chunk at a time.
 - Mining supports ASCII-compatible encodings (ASCII, UTF-8, cp1252, ISO-8859-1) directly, and
   UTF-16/32 through the conversion copy, which needs temporary disk space for the converted text.
 - The CLI, `run_mining` and the MCP tools hold a cross-process lock per job, so a second process
