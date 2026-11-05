@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import bz2
+import csv
 import gzip
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +21,10 @@ from datamining_skill.application.data_quality import (
     classify_text,
     unique_names,
 )
+from datamining_skill.application.record_formats import CsvFormatter
 from datamining_skill.cli import main
+from datamining_skill.domain.models import TextLine
+from datamining_skill.infrastructure.handlers.csv_handler import CsvHandler
 from tests.test_mcp_server import Client, call
 
 
@@ -466,3 +471,68 @@ def test_the_server_refuses_a_path_outside_the_workspace(state_dir: Path) -> Non
     )
 
     assert response["result"]["isError"] is True
+
+
+def test_csv_code_run_on_eight_threads_at_once_does_not_trip_over_itself(state_dir: Path) -> None:
+    """The csv module's field limit is shared by the whole process, and one formatter serves every thread."""
+    big = "x" * 300_000  # over the module's default limit of 128 KiB, under the one the code sets
+    path = state_dir / "wide.csv"
+    path.write_text("id,note\n" + "".join(f'{n},"{big}"\n' for n in range(3)), encoding="utf-8")
+    sample = [TextLine(text, len(text) + 1) for text in ("id,note", f"1,{big}", f"2,{big}", "3,plain")]
+    formatter = CsvFormatter(["a", "b", "c"])
+    cells = [
+        ["plain", "with,comma", 'with "quote"'],
+        ["", "line\nbreak", "tab\tseparated"],
+        ["clean", "values", "only"],
+    ]
+    expected = [CsvFormatter(["a", "b", "c"]).format(row) for row in cells]
+    failures: list[str] = []
+    start = threading.Barrier(8)
+
+    def work(worker: int) -> None:
+        start.wait()
+        try:
+            for round_ in range(8):
+                analysis = CsvHandler().analyze(iter(sample), 200)
+                if analysis is None or analysis.structure.fields != ("id", "note"):
+                    failures.append(f"worker {worker} round {round_}: the table was not recognised")
+                report = check_quality(path)
+                kinds = json.dumps(report)
+                if "field_too_large" in kinds or "bad_quoting" in kinds or report["summary"]["records_valid"] != 3:
+                    failures.append(f"worker {worker} round {round_}: a field was refused")
+                for row, wanted in zip(cells, expected, strict=True):
+                    if formatter.format(row) != wanted:
+                        failures.append(f"worker {worker} round {round_}: {row!r} was written wrongly")
+        except Exception as exc:
+            failures.append(f"worker {worker}: {type(exc).__name__}: {exc}")
+
+    threads = [threading.Thread(target=work, args=(n,)) for n in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert failures == []
+
+
+def test_a_csv_value_over_the_scan_limit_is_reported_once_the_limit_has_been_raised(state_dir: Path) -> None:
+    giant = ("y" * 1000 + "\n") * 4300  # one quoted value over 4 MiB, in lines the reader accepts
+    (state_dir / "giant.csv").write_text(f'id,note\n1,ok\n2,"{giant}"\n3,ok\n', encoding="utf-8")
+    CsvHandler().analyze(iter([TextLine("a,b", 4), TextLine("1,2", 4)]), 10)  # sets the shared limit
+
+    report = check_quality(state_dir / "giant.csv")
+
+    assert "field_too_large" in json.dumps(report)
+
+
+def test_the_shared_csv_field_limit_is_raised_and_left_raised(state_dir: Path) -> None:
+    """Putting an earlier, smaller limit back would undo the raise another thread depends on."""
+    (state_dir / "ok.csv").write_text("id,name\n1,ada\n2,bob\n", encoding="utf-8")
+    previous = csv.field_size_limit(200_000)
+    try:
+        CsvHandler().analyze(iter([TextLine("a,b", 4), TextLine("1,2", 4)]), 10)
+        check_quality(state_dir / "ok.csv")
+
+        assert csv.field_size_limit() >= 4 * 1024 * 1024  # both raised it, and neither put 200 000 back
+    finally:
+        csv.field_size_limit(previous)

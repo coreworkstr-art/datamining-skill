@@ -14,6 +14,7 @@ DEFAULT_PREVIEW_ROWS = 20
 MAX_PREVIEW_ROWS = 200
 _PREVIEW_BYTES = 256 * 1024
 _MAX_JSON_DEPTH = 32
+_CELL_LIMIT = 128 * 1024  # a longer CSV value ends the preview, as the csv module's default limit did
 
 
 def _is_shallow(value: Any) -> bool:
@@ -68,10 +69,15 @@ def _read_preview(path: Path, rows: int) -> dict[str, Any]:
         cut_short = False
         try:
             for row in csv.reader(line + "\n" for line in lines):  # a line break can be part of a value
+                # the csv module's own limit is a setting of the whole process that other threads
+                # raise, so the limit this preview stands by is checked here
+                if any(len(cell) > _CELL_LIMIT for cell in row):
+                    cut_short = True
+                    break
                 table.append(row)
                 if len(table) > rows + 1:
                     break
-        except csv.Error:  # a value over the csv module's 128 KiB limit: show what came before it
+        except csv.Error:  # a value the csv module itself refuses: show what came before it
             cut_short = True
         columns = table[0] if table else []
         records: list[Any] = table[1 : 1 + rows]

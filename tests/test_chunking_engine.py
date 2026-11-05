@@ -489,3 +489,35 @@ def test_boundary_locator_scans_backwards_across_blocks(write_file: WriteFile) -
     assert locator.last_boundary(path, 0, 2) is None
     assert locator.last_boundary(path, 3, 6) == 6
     assert locator.last_boundary(path, 6, 8) is None
+
+
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [
+        # the last newline sits inside a quoted value: the one before the record is the boundary
+        (b'1,a\n2,b\n3,"multi\nquoted"', 8),
+        # a doubled quote inside the value does not change which newlines are quoted
+        (b'1,x\n2,"say ""hi""\nbye"\n3,y', 23),
+        (b'1,x\n2,"say ""hi""\nbye"', 4),
+        # no quote: the last newline, as before
+        (b"1,a\n2,b\n3,c", 8),
+        # every newline looks quoted (the block began inside a value): the last one is used after all
+        (b'"a\nb', 3),
+        (b'x"\ny\nz', 5),
+    ],
+)
+def test_boundary_locator_avoids_newlines_inside_quoted_values(
+    write_file: WriteFile, data: bytes, expected: int
+) -> None:
+    path = write_file("q.csv", data)
+
+    assert NewlineBoundaryLocator(block_bytes=1024).last_boundary(path, 0, len(data)) == expected
+
+
+def test_boundary_locator_never_fails_when_a_newline_exists(write_file: WriteFile) -> None:
+    data = b'"' + b"line\n" * 40 + b"end"
+    path = write_file("odd.csv", data)
+
+    for block in (4, 16, 1024):
+        boundary = NewlineBoundaryLocator(block_bytes=block).last_boundary(path, 0, len(data))
+        assert boundary is not None and data[boundary - 1 : boundary] == b"\n"

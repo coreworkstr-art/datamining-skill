@@ -53,6 +53,20 @@ All notable changes are recorded here. The format follows
   an archive announcing more than 16 entries or a directory over 64 KiB (also through the ZIP64
   records) is refused with a plain message.
 
+### Changed
+
+- **The CSV field limit is no longer put back.** `csv.field_size_limit` is a setting of the whole
+  process; the profiler and the quality scan each set it and restored the old value, so threads that
+  overlapped undid each other's limit. It is now only raised (to 4 MiB), the quality scan checks its
+  own limit on every row, and `preview_result` its own 128 KiB.
+- **`CsvFormatter` is safe to share between threads**: the slow path (a cell with a comma, quote,
+  line break, or empty) no longer reuses one buffer.
+- **Record boundaries respect quotes.** When a chunk end falls in a CSV file with quoted values that
+  contain line breaks, the boundary is moved to a newline outside quotes where one is in reach (judged
+  within the block that is searched; with none, the last newline is used as before).
+- **`OrchestratorConfig(max_workers=1..16)`** mines several chunks at once on threads (library use;
+  default 1). Chunks are still merged and committed in order on the calling thread, so the output and
+  the state ledger match a sequential run. Unique mining stays sequential.
 ## [0.3.0] - 2026-11-01
 
 ### Added

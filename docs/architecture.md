@@ -373,7 +373,7 @@ Profiler ─▶ ChunkingEngine ─▶ StateManager.initialize          (first ru
 | `ExtractionStrategy` | Pure function: text in, zero or more records out (`RegexExtractor` for any pattern, `EmailExtractor` for the built-in extraction). | Perform I/O or keep per-file state. |
 | `RecordFormatter` | Serialises a record to CSV or JSONL bytes. | Decide what is extracted. |
 | `ResultAggregator` | Moves a finished scratch file onto the end of the output, idempotently. | Mark chunks complete. |
-| `MiningOrchestrator` | The single-threaded loop: claim, mine, merge, commit; failure isolation; resume checks. | Read or write data itself. |
+| `MiningOrchestrator` | The loop: claim, mine, merge, commit; failure isolation; resume checks. Chunks are claimed, merged and committed on the calling thread in ascending order; with OrchestratorConfig(max_workers=2..16) (library only, default 1) the mining of up to that many chunks runs on worker threads. Unique mining stays sequential, because its keys live in the thread-bound state database. | Read or write data itself. |
 
 The worker reads through `StreamReader.range_lines` or `StreamReader.range_blocks`, which cap
 every read at the bytes left in the range, so it stops *exactly* at `end_byte` even if a

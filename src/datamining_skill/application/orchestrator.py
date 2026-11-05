@@ -1,11 +1,17 @@
-"""The resumable, single-threaded mining loop (docs/architecture.md, "Mining pipeline")."""
+"""The resumable mining loop (docs/architecture.md, "Mining pipeline").
+
+Chunks are claimed, merged and marked on the calling thread; with ``max_workers`` above 1 only the
+mining of each chunk runs on worker threads.
+"""
 
 from __future__ import annotations
 
 import logging
 import os
 import time
+from collections import deque
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -13,7 +19,7 @@ from typing import Any
 from datamining_skill.application.chunking_engine import ChunkingEngine
 from datamining_skill.application.config import OrchestratorConfig
 from datamining_skill.application.data_profiler import DataProfiler
-from datamining_skill.application.miner_worker import MinerWorker, SourceDescriptor
+from datamining_skill.application.miner_worker import ChunkResult, MinerWorker, SourceDescriptor
 from datamining_skill.application.result_aggregator import ResultAggregator
 from datamining_skill.application.support import describe_failure, emit_event
 from datamining_skill.domain.exceptions import (
@@ -21,7 +27,7 @@ from datamining_skill.domain.exceptions import (
     StateStoreException,
     UnsupportedDataFormatException,
 )
-from datamining_skill.domain.models import ChunkMetadata, ChunkStatus
+from datamining_skill.domain.models import ChunkMetadata, ChunkRecord, ChunkStatus
 from datamining_skill.domain.ports import ChunkStateStore, ScratchStore, UniqueKeyStore
 
 
@@ -83,6 +89,25 @@ class MiningSummary:
             "oversized_lines": self.oversized_lines,
             "source_transform": self.source_transform,
         }
+
+
+class _RunTotals:
+    """What one run has handled so far (this thread only)."""
+
+    __slots__ = ("duplicates", "first_error", "handled", "oversized", "processed", "records")
+
+    def __init__(self) -> None:
+        self.processed = self.handled = self.records = self.duplicates = self.oversized = 0
+        self.first_error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _Submitted:
+    """A claimed chunk waiting to be settled; ``future`` is None for one given up on."""
+
+    claimed: ChunkRecord
+    started: float
+    future: Future[ChunkResult] | None
 
 
 class MiningOrchestrator:
@@ -185,77 +210,21 @@ class MiningOrchestrator:
             chunks_completed=counts_before[ChunkStatus.COMPLETED],
         )
 
-        processed = records = handled = duplicates = oversized = 0
-        first_error: str | None = None
+        run = _RunTotals()
         total_chunks = sum(counts_before.values())
         already_done = counts_before[ChunkStatus.COMPLETED] + counts_before[ChunkStatus.FAILED]
 
         def report() -> None:
             if on_progress is not None:
-                on_progress(MiningProgress(already_done + handled, total_chunks, records))
+                on_progress(MiningProgress(already_done + run.handled, total_chunks, run.records))
 
         report()
-        while (claimed := self._state.claim_next_pending()) is not None:
-            chunk_id = claimed.chunk_id
-            if claimed.retry_count >= self._config.max_attempts:
-                self._state.mark_failed(chunk_id)
-                handled += 1
-                first_error = first_error or (
-                    f"chunk {chunk_id}: given up after {claimed.retry_count} failed or interrupted attempts"
-                )
-                self._emit(
-                    logging.WARNING,
-                    "chunk.abandoned",
-                    chunk_id=chunk_id,
-                    attempts=claimed.retry_count,
-                )
-                report()
-                continue
-
-            if claimed.retry_count > 0 and self._unique_keys is not None:
-                self._unique_keys.discard(chunk_id)  # an earlier attempt may have registered keys
-            chunk_started = self._clock()
-            chunk = ChunkMetadata(chunk_id, claimed.start_byte, claimed.end_byte)
-            try:
-                chunk_result = self._worker.process(descriptor, chunk)
-                output_end = self._aggregator.merge(chunk_result)
-            except Exception as exc:  # noqa: BLE001 - isolate one chunk's failure
-                self._scratch.discard_tmp(chunk_id)
-                self._aggregator.rollback_uncommitted()
-                if self._unique_keys is not None:
-                    self._unique_keys.discard(chunk_id)  # its records were never written
-                self._state.mark_failed(chunk_id)
-                handled += 1
-                reason = describe_failure(exc)
-                first_error = first_error or f"chunk {chunk_id}: {reason}"
-                self._emit(
-                    logging.WARNING,
-                    "chunk.failed",
-                    chunk_id=chunk_id,
-                    error_type=type(exc).__name__,
-                    reason=reason,
-                    attempts=claimed.retry_count + 1,
-                )
-                report()
-                continue
-
-            self._state.mark_completed(chunk_id, output_end=output_end)
-            processed += 1
-            handled += 1
-            records += chunk_result.records_written
-            duplicates += chunk_result.duplicates_skipped
-            oversized += chunk_result.oversized_lines
-            self._emit(
-                logging.INFO,
-                "chunk.completed",
-                chunk_id=chunk_id,
-                lines=chunk_result.lines_read,
-                records=chunk_result.records_written,
-                oversized_lines=chunk_result.oversized_lines,
-                duplicates_skipped=chunk_result.duplicates_skipped,
-                duration_ms=round((self._clock() - chunk_started) * 1000, 3),
-            )
-            report()
+        if self._config.max_workers > 1 and self._unique_keys is None:
+            self._mine_in_parallel(descriptor, run, report)
+        else:  # unique mining registers keys in the state database, which only this thread may use
+            self._mine_in_sequence(descriptor, run, report)
+        processed, handled, records = run.processed, run.handled, run.records
+        duplicates, oversized, first_error = run.duplicates, run.oversized, run.first_error
 
         counts_after = self._state.summary()
         summary = MiningSummary(
@@ -280,6 +249,127 @@ class MiningOrchestrator:
         )
         self._emit(logging.INFO, "mining.completed", **summary.to_dict())
         return summary
+
+    def _mine_in_sequence(
+        self, descriptor: SourceDescriptor, run: _RunTotals, report: Callable[[], None]
+    ) -> None:
+        while (claimed := self._state.claim_next_pending()) is not None:
+            if claimed.retry_count >= self._config.max_attempts:
+                self._abandon(claimed, run)
+                report()
+                continue
+            if claimed.retry_count > 0 and self._unique_keys is not None:
+                self._unique_keys.discard(claimed.chunk_id)  # an earlier attempt may have registered keys
+            chunk_started = self._clock()
+            chunk = ChunkMetadata(claimed.chunk_id, claimed.start_byte, claimed.end_byte)
+            try:
+                chunk_result = self._worker.process(descriptor, chunk)
+                output_end = self._aggregator.merge(chunk_result)
+            except Exception as exc:  # noqa: BLE001 - isolate one chunk's failure
+                self._fail(claimed, exc, run)
+                report()
+                continue
+            self._complete(claimed, chunk_result, output_end, chunk_started, run)
+            report()
+
+    def _mine_in_parallel(
+        self, descriptor: SourceDescriptor, run: _RunTotals, report: Callable[[], None]
+    ) -> None:
+        """Mine up to ``max_workers`` chunks at once, but settle them one by one in claim order.
+
+        Only the worker threads read the source and write scratch files. Claiming, merging and
+        marking happen on this thread, in ascending chunk order: the head of the queue is
+        settled first however early a later chunk finishes, so the output and the state ledger
+        are the same as a sequential run's and a crash leaves the same kind of state.
+        """
+        workers = self._config.max_workers
+        queue: deque[_Submitted] = deque()
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="datamining-chunk") as pool:
+            try:
+                while True:
+                    while len(queue) < workers and (claimed := self._state.claim_next_pending()) is not None:
+                        if claimed.retry_count >= self._config.max_attempts:
+                            queue.append(_Submitted(claimed, 0.0, None))
+                            continue
+                        chunk = ChunkMetadata(claimed.chunk_id, claimed.start_byte, claimed.end_byte)
+                        future = pool.submit(self._worker.process, descriptor, chunk)
+                        queue.append(_Submitted(claimed, self._clock(), future))
+                    if not queue:
+                        return
+                    head = queue.popleft()
+                    if head.future is None:
+                        self._abandon(head.claimed, run)
+                        report()
+                        continue
+                    try:
+                        chunk_result = head.future.result()
+                        output_end = self._aggregator.merge(chunk_result)
+                    except Exception as exc:  # noqa: BLE001 - isolate one chunk's failure
+                        self._fail(head.claimed, exc, run)
+                        report()
+                        continue
+                    self._complete(head.claimed, chunk_result, output_end, head.started, run)
+                    report()
+            finally:
+                # leaving early (an interrupt, a failing progress callback): nothing new may start,
+                # and the pool waits for the running chunks, so no thread writes after run() returns
+                for item in queue:
+                    if item.future is not None:
+                        item.future.cancel()
+
+    def _abandon(self, claimed: ChunkRecord, run: _RunTotals) -> None:
+        self._state.mark_failed(claimed.chunk_id)
+        run.handled += 1
+        run.first_error = run.first_error or (
+            f"chunk {claimed.chunk_id}: given up after {claimed.retry_count} failed or interrupted attempts"
+        )
+        self._emit(
+            logging.WARNING, "chunk.abandoned", chunk_id=claimed.chunk_id, attempts=claimed.retry_count
+        )
+
+    def _fail(self, claimed: ChunkRecord, exc: Exception, run: _RunTotals) -> None:
+        chunk_id = claimed.chunk_id
+        self._scratch.discard_tmp(chunk_id)
+        self._aggregator.rollback_uncommitted()
+        if self._unique_keys is not None:
+            self._unique_keys.discard(chunk_id)  # its records were never written
+        self._state.mark_failed(chunk_id)
+        run.handled += 1
+        reason = describe_failure(exc)
+        run.first_error = run.first_error or f"chunk {chunk_id}: {reason}"
+        self._emit(
+            logging.WARNING,
+            "chunk.failed",
+            chunk_id=chunk_id,
+            error_type=type(exc).__name__,
+            reason=reason,
+            attempts=claimed.retry_count + 1,
+        )
+
+    def _complete(
+        self,
+        claimed: ChunkRecord,
+        chunk_result: ChunkResult,
+        output_end: int,
+        chunk_started: float,
+        run: _RunTotals,
+    ) -> None:
+        self._state.mark_completed(claimed.chunk_id, output_end=output_end)
+        run.processed += 1
+        run.handled += 1
+        run.records += chunk_result.records_written
+        run.duplicates += chunk_result.duplicates_skipped
+        run.oversized += chunk_result.oversized_lines
+        self._emit(
+            logging.INFO,
+            "chunk.completed",
+            chunk_id=claimed.chunk_id,
+            lines=chunk_result.lines_read,
+            records=chunk_result.records_written,
+            oversized_lines=chunk_result.oversized_lines,
+            duplicates_skipped=chunk_result.duplicates_skipped,
+            duration_ms=round((self._clock() - chunk_started) * 1000, 3),
+        )
 
     def _emit(self, level: int, event: str, **context: Any) -> None:
         emit_event(self._logger, level, event, **context)

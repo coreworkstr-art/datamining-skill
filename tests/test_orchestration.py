@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import uuid
 from collections.abc import Iterable, Iterator
 from pathlib import Path
@@ -37,6 +38,7 @@ from datamining_skill import (
     create_orchestrator,
 )
 from datamining_skill.application.extraction_strategy import EMAIL_PATTERN
+from datamining_skill.application.orchestrator import MiningSummary
 from datamining_skill.domain.ports import ChunkStateStore, StreamReader
 from datamining_skill.infrastructure import FileStreamReader, JsonLogFormatter
 from datamining_skill.infrastructure.output_sink import LocalOutputSink
@@ -658,6 +660,150 @@ def test_invalid_orchestrator_settings_are_rejected() -> None:
     with pytest.raises(InvalidConfigurationException):
         OrchestratorConfig(max_attempts=0)
 
+
+@pytest.mark.parametrize("workers", [0, -1, 17, True, 2.5, "4"])
+def test_the_number_of_workers_must_be_a_whole_number_from_1_to_16(workers: Any) -> None:
+    with pytest.raises(InvalidConfigurationException, match="max_workers"):
+        OrchestratorConfig(max_workers=workers)
+
+
+def test_valid_worker_counts_are_accepted_and_one_is_the_default() -> None:
+    assert OrchestratorConfig().max_workers == 1
+    assert OrchestratorConfig(max_workers=16).max_workers == 16
+
+
+class RecordingState:
+    """Passes everything to a ``StateManager`` and notes where and in which order chunks are settled."""
+
+    def __init__(self, inner: ChunkStateStore) -> None:
+        self._inner = inner
+        self.settled: list[tuple[str, int]] = []
+        self.threads: set[int] = set()
+
+    def __getattr__(self, name: str) -> Any:
+        attribute = getattr(self._inner, name)
+        if name in ("claim_next_pending", "mark_completed", "mark_failed"):
+
+            def noting(*args: Any, **kwargs: Any) -> Any:
+                self.threads.add(threading.get_ident())
+                result = attribute(*args, **kwargs)
+                if name != "claim_next_pending":
+                    self.settled.append((name, args[0]))
+                return result
+
+            return noting
+        return attribute
+
+
+class FailsOnAddress:
+    """Strategy wrapper that raises on the line holding one particular address, whichever thread reads it."""
+
+    def __init__(self, inner: ExtractionStrategy, address: str) -> None:
+        self._inner = inner
+        self._address = address
+        self.fields = inner.fields
+
+    def extract(self, line: str) -> Iterable[Any]:
+        if self._address in line:
+            raise ValueError("strategy bug")
+        return self._inner.extract(line)
+
+
+def mine_with_workers(
+    source: Path, state_dir: Path, open_state: OpenState, workers: int, **overrides: Any
+) -> tuple[Path, MiningSummary, RecordingState]:
+    run_dir = state_dir / f"workers-{workers}"
+    run_dir.mkdir()
+    state = RecordingState(open_state(f"workers-{workers}.sqlite3"))
+    summary = build(
+        cast(ChunkStateStore, state),
+        source,
+        run_dir,
+        orchestrator_config=OrchestratorConfig(max_workers=workers),
+        **overrides,
+    ).run(source)
+    return run_dir / "results.csv", summary, state
+
+
+def ledger(state: RecordingState) -> list[tuple[int, int, int, str, int]]:
+    return [
+        (r.chunk_id, r.start_byte, r.end_byte, r.status.value, r.retry_count)
+        for r in state.records()
+    ]
+
+
+def test_four_workers_give_the_same_output_and_ledger_as_one(
+    dataset: tuple[Path, list[str]], state_dir: Path, open_state: OpenState
+) -> None:
+    source, expected = dataset
+
+    single_out, single, single_state = mine_with_workers(source, state_dir, open_state, 1)
+    several_out, several, several_state = mine_with_workers(source, state_dir, open_state, 4)
+
+    assert single_out.read_bytes() == several_out.read_bytes()
+    assert read_results(several_out) == expected
+    assert ledger(single_state) == ledger(several_state)
+    assert several_state.committed_output_end() == single_state.committed_output_end()
+    assert (several.chunks_processed, several.records_written) == (single.chunks_processed, single.records_written)
+    assert several.succeeded and several_state.is_complete()
+    assert list((state_dir / "workers-4" / "tmp").glob("chunk_*.tmp")) == []
+
+
+def test_chunks_are_settled_in_order_on_the_calling_thread(
+    dataset: tuple[Path, list[str]], state_dir: Path, open_state: OpenState
+) -> None:
+    source, _ = dataset
+
+    _, _, recorder = mine_with_workers(source, state_dir, open_state, 4)
+
+    assert recorder.threads == {threading.get_ident()}  # the database is only touched here
+    assert [name for name, _ in recorder.settled] == ["mark_completed"] * len(recorder.settled)
+    chunk_ids = [chunk_id for _, chunk_id in recorder.settled]
+    assert chunk_ids == sorted(chunk_ids) and len(chunk_ids) > 8
+
+
+def test_one_failing_chunk_is_isolated_with_several_workers(
+    dataset: tuple[Path, list[str]], state_dir: Path, open_state: OpenState
+) -> None:
+    source, expected = dataset
+    strategy = FailsOnAddress(RegexExtractor.emails(), expected[5000])
+
+    single_out, _, single_state = mine_with_workers(source, state_dir, open_state, 1, strategy=strategy)
+    several_out, several, several_state = mine_with_workers(source, state_dir, open_state, 4, strategy=strategy)
+
+    failed = [r.chunk_id for r in several_state.records(ChunkStatus.FAILED)]
+    assert len(failed) == 1 and several.chunks_failed == 1 and several.first_error is not None
+    assert single_out.read_bytes() == several_out.read_bytes()
+    assert ledger(single_state) == ledger(several_state)
+    assert [cid for name, cid in several_state.settled if name == "mark_failed"] == failed
+    chunk_ids = [chunk_id for _, chunk_id in several_state.settled]
+    assert chunk_ids == sorted(chunk_ids)
+    assert list((state_dir / "workers-4" / "tmp").glob("chunk_*.tmp")) == []
+
+
+def test_an_interrupted_parallel_run_leaves_no_thread_behind_and_resumes(
+    dataset: tuple[Path, list[str]], state_dir: Path, open_state: OpenState
+) -> None:
+    source, expected = dataset
+    calls = 0
+
+    def stop_early(_: Any) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 4:
+            raise Crash
+
+    run_dir = state_dir / "interrupted"
+    run_dir.mkdir()
+    config = OrchestratorConfig(max_workers=4)
+    with pytest.raises(Crash):
+        build(open_state("i.sqlite3"), source, run_dir, orchestrator_config=config).run(source, on_progress=stop_early)
+
+    assert not [t for t in threading.enumerate() if t.name.startswith("datamining-chunk")]
+    resumed = build(open_state("i.sqlite3"), source, run_dir, orchestrator_config=config).run(source)
+
+    assert resumed.succeeded and resumed.resumed
+    assert read_results(run_dir / "results.csv") == expected
 
 
 

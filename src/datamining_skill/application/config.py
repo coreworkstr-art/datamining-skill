@@ -59,14 +59,24 @@ class OrchestratorConfig:
     A chunk that already failed or was abandoned by a crash ``max_attempts`` times is marked
     FAILED without another try, so a chunk that kills the process cannot crash-loop forever.
     ``retry_failed_on_start`` requeues FAILED chunks with attempts left when resuming.
+    ``max_workers`` (1 to 16) mines that many chunks at once on threads; chunks are still merged and
+    committed in order on the calling thread. It has no effect on unique mining, which stays
+    sequential because its keys live in the thread-bound state database.
     """
 
     max_attempts: int = 3
     retry_failed_on_start: bool = True
+    max_workers: int = 1
 
     def __post_init__(self) -> None:
         if self.max_attempts < 1:
             raise InvalidConfigurationException("'max_attempts' must be at least 1")
+        if (
+            not isinstance(self.max_workers, int)
+            or isinstance(self.max_workers, bool)
+            or not 1 <= self.max_workers <= 16
+        ):
+            raise InvalidConfigurationException("'max_workers' must be a whole number from 1 to 16")
 
 
 @dataclass(frozen=True, slots=True)

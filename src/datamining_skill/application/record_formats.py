@@ -25,8 +25,6 @@ class CsvFormatter:
         self._fields = tuple(fields)
         self._width = len(self._fields)
         self._guard = formula_guard
-        self._buffer = io.StringIO()
-        self._writer = csv.writer(self._buffer, lineterminator="\n")
 
     def header(self) -> bytes:
         return self._encode(self._fields)
@@ -51,11 +49,11 @@ class CsvFormatter:
         return (",".join(record) + "\n").encode("utf-8")
 
     def _encode(self, row: Sequence[str]) -> bytes:
-        self._writer.writerow(row)
-        encoded_record = self._buffer.getvalue().encode("utf-8")
-        self._buffer.seek(0)
-        self._buffer.truncate(0)
-        return encoded_record
+        # a buffer and a writer of its own per call: worker threads may format at the same time,
+        # and this is only the slow path (a cell with a comma, quote, line break, or empty)
+        buffer = io.StringIO()
+        csv.writer(buffer, lineterminator="\n").writerow(row)
+        return buffer.getvalue().encode("utf-8")
 
 
 class JsonlFormatter:

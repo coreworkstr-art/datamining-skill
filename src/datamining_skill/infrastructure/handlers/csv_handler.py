@@ -14,9 +14,10 @@ _MIN_CONSISTENCY = 0.9
 _HEADERLESS_FACTOR = 0.8
 _SINGLE_ROW_FACTOR = 0.5
 _MAX_COLUMN_NAME_CHARS = 64
-# csv refuses fields over 128 KiB by default; a line is already capped well below this, so
-# the limit is raised only for the duration of a tokenisation
-_FIELD_SIZE_LIMIT = 2**30
+# csv refuses fields over 128 KiB by default. The limit is a setting of the whole process, shared by
+# every thread, so it is only ever raised (never put back, which would undo another thread's raise)
+# and to one value that both the profiler and the quality scan are content with.
+_FIELD_SIZE_LIMIT = 4 * 1024 * 1024
 
 
 def _looks_like_column_name(cell: str) -> bool:
@@ -130,7 +131,8 @@ class CsvHandler:
         rows: list[tuple[list[str], int]] = []
         multiline = False
         previous_fed = 0
-        previous_limit = csv.field_size_limit(_FIELD_SIZE_LIMIT)
+        if csv.field_size_limit() < _FIELD_SIZE_LIMIT:
+            csv.field_size_limit(_FIELD_SIZE_LIMIT)
         try:
             for row in csv.reader(feed(), delimiter=delimiter):
                 if fed - previous_fed > 1:
@@ -140,6 +142,4 @@ class CsvHandler:
                     rows.append((row, consumed))
         except csv.Error:
             return None
-        finally:
-            csv.field_size_limit(previous_limit)
         return rows, multiline

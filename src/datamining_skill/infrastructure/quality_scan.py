@@ -125,33 +125,36 @@ def _scan_csv(
     header_pending = structure.has_header is not False
     if not header_pending:
         accumulator.set_columns(structure.fields)
-    previous_limit = csv.field_size_limit(_CSV_FIELD_LIMIT)  # restored below, as the CSV profiler does
-    try:
-        stalled = 0
-        while accumulator.total < max_records:
-            record_line = progress.line + 1
-            lines_before = progress.line
-            try:
-                row = next(reader)
-            except StopIteration:
+    # the limit is process-wide and shared with other threads, so it is only raised, never restored;
+    # the limit this scan stands by is enforced on every row below as well
+    if csv.field_size_limit() < _CSV_FIELD_LIMIT:
+        csv.field_size_limit(_CSV_FIELD_LIMIT)
+    stalled = 0
+    while accumulator.total < max_records:
+        record_line = progress.line + 1
+        lines_before = progress.line
+        try:
+            row = next(reader)
+        except StopIteration:
+            return
+        except csv.Error as problem:
+            kind = "field_too_large" if "field larger" in str(problem) else "bad_quoting"
+            accumulator.malformed(record_line, kind)
+            stalled = stalled + 1 if progress.line == lines_before else 0
+            if stalled > 3:  # defensive: an error that consumes nothing must not loop forever
                 return
-            except csv.Error as problem:
-                kind = "field_too_large" if "field larger" in str(problem) else "bad_quoting"
-                accumulator.malformed(record_line, kind)
-                stalled = stalled + 1 if progress.line == lines_before else 0
-                if stalled > 3:  # defensive: an error that consumes nothing must not loop forever
-                    return
-                continue
-            if not row:
-                if progress.stand_ins:
-                    progress.stand_ins -= 1  # already counted as a line that was too long
-                else:
-                    accumulator.blank_lines += 1
-                continue
-            if header_pending:
-                header_pending = False
-                accumulator.set_columns(row)
-                continue
-            accumulator.add_row(record_line, row)
-    finally:
-        csv.field_size_limit(previous_limit)
+            continue
+        if any(len(cell) > _CSV_FIELD_LIMIT for cell in row):
+            accumulator.malformed(record_line, "field_too_large")
+            continue
+        if not row:
+            if progress.stand_ins:
+                progress.stand_ins -= 1  # already counted as a line that was too long
+            else:
+                accumulator.blank_lines += 1
+            continue
+        if header_pending:
+            header_pending = False
+            accumulator.set_columns(row)
+            continue
+        accumulator.add_row(record_line, row)
