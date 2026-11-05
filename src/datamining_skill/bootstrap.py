@@ -49,6 +49,7 @@ from datamining_skill.infrastructure.handlers import (
     JsonDocumentHandler,
     JsonlHandler,
     LogHandler,
+    TextHandler,
 )
 from datamining_skill.infrastructure.job_lock import JobLock
 from datamining_skill.infrastructure.logging import (
@@ -101,7 +102,7 @@ def create_profiler(
         streams=streams,
         encoding_detector=StdlibEncodingDetector(),
         content_guard=BinaryContentGuard(),
-        format_detector=FormatDetector(handlers, streams, settings),
+        format_detector=FormatDetector(handlers, streams, settings, fallback=TextHandler()),
         record_estimator=RecordEstimator(streams, settings),
         memory_probe=memory_probe or ProcessMemoryProbe(),
         logger=logger or logging.getLogger(PROFILER_LOGGER_NAME),
@@ -456,15 +457,19 @@ def check_quality(
     *,
     workspace: str | os.PathLike[str] | None = None,
     max_records: int = DEFAULT_MAX_RECORDS,
+    max_seconds: float | None = None,
     config: ProfilerConfig | None = None,
 ) -> dict[str, Any]:
     """Check the records of a CSV, TSV or JSON Lines file and report what is wrong with them.
 
     One pass in constant memory over at most ``max_records`` records: malformed records (by
     kind, with the first line numbers), how complete each field is, and fields whose values
-    change type. Values are never kept or reported. A compressed file is checked on its first
+    change type. Values are never kept or reported. With ``max_seconds`` the pass also stops
+    after that long and the report says so. A compressed file is checked on its first
     ``QUALITY_SAMPLE_BYTES`` once decompressed, held briefly in the workspace's ``.scratch``.
     """
+    if max_seconds is not None and not max_seconds > 0:
+        raise InvalidConfigurationException("'max_seconds' must be greater than 0")
     source = Path(path)
     stat_regular_file(source)
     settings = config or ProfilerConfig()
@@ -474,7 +479,9 @@ def check_quality(
         compressed = compression_of(handle.read(8)) is not None
     size = source.stat().st_size
     if not compressed:
-        report = scan_quality(source, profiler.profile(source), reader, max_records=max_records)
+        report = scan_quality(
+            source, profiler.profile(source), reader, max_records=max_records, max_seconds=max_seconds
+        )
         report["file"] = {"name": source.name, "size_bytes": size, "size_human": format_size(size)}
         return report
 
@@ -485,7 +492,9 @@ def check_quality(
         transform = convert_to_utf8(source, sample, sample_bytes=QUALITY_SAMPLE_BYTES)
         truncated = sample.stat().st_size >= QUALITY_SAMPLE_BYTES
         try:
-            report = scan_quality(sample, profiler.profile(sample), reader, max_records=max_records)
+            report = scan_quality(
+                sample, profiler.profile(sample), reader, max_records=max_records, max_seconds=max_seconds
+            )
         except UnsupportedDataFormatException as exc:
             raise UnsupportedDataFormatException(source.name, exc.reason) from exc
     finally:
@@ -539,8 +548,8 @@ def create_mcp_server(
         policy,
         profile=profile_runner
         or (lambda path: profile_source(path, workspace=policy.workspace)),
-        quality=lambda path, max_records: check_quality(
-            path, workspace=policy.workspace, max_records=max_records
+        quality=lambda path, max_records, max_seconds: check_quality(
+            path, workspace=policy.workspace, max_records=max_records, max_seconds=max_seconds
         ),
         mine=mine_runner or run_mining,
         allow_custom_patterns=allow_custom_patterns,

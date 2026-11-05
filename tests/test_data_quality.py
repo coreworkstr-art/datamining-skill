@@ -14,7 +14,12 @@ from typing import Any
 
 import pytest
 
-from datamining_skill import UnsupportedDataFormatException, check_quality
+from datamining_skill import (
+    InvalidConfigurationException,
+    UnsupportedDataFormatException,
+    check_quality,
+    create_mcp_server,
+)
 from datamining_skill.application.data_quality import (
     MAX_EXAMPLES,
     MAX_TRACKED_FIELDS,
@@ -32,8 +37,11 @@ from datamining_skill.application.stream_statistics import (
 )
 from datamining_skill.cli import main
 from datamining_skill.domain.models import TextLine
+from datamining_skill.infrastructure import quality_scan
 from datamining_skill.infrastructure.handlers.csv_handler import CsvHandler
 from tests.test_mcp_server import Client, call
+
+IBAN_NAME = "TR330006100519786457841326"  # letters first and no "@": a first row holding it is still a header
 
 
 def by_name(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -434,18 +442,19 @@ def test_the_command_line_validates_the_record_limit(state_dir: Path, capsys: py
 
 
 def test_the_command_line_can_mask_field_names(state_dir: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    (state_dir / "h.csv").write_text("ada@internal.corp.test,name,score\n" + good_rows(60), encoding="utf-8")
+    # a first row with an IBAN in it is still a header (an address would make it data), so the IBAN is a field name
+    (state_dir / "h.csv").write_text(f"{IBAN_NAME},name,score\n" + good_rows(60), encoding="utf-8")
 
     assert main(["quality", str(state_dir / "h.csv"), "--mask"]) == 0
 
     out = capsys.readouterr().out
-    assert "internal.corp.test" not in out and json.loads(out)["pii_masked"] == {"EMAIL": 1}
+    assert IBAN_NAME not in out and json.loads(out)["pii_masked"] == {"IBAN": 1}
 
 
 def test_the_server_offers_the_tool_and_masks_names_by_default(state_dir: Path) -> None:
     from datamining_skill import create_mcp_server
 
-    (state_dir / "h.csv").write_text("ada@internal.corp.test,name,score\n5\n" + good_rows(60), encoding="utf-8")
+    (state_dir / "h.csv").write_text(f"{IBAN_NAME},name,score\n5\n" + good_rows(60), encoding="utf-8")
     client = Client(create_mcp_server([state_dir]))
 
     tools, response = client.handshake_and(
@@ -456,7 +465,7 @@ def test_the_server_offers_the_tool_and_masks_names_by_default(state_dir: Path) 
     assert quality["annotations"]["readOnlyHint"] is True
     report = response["result"]["structuredContent"]
     assert report["summary"]["records_malformed"] == 1
-    assert "internal.corp.test" not in json.dumps(response["result"]) and report["pii_masked"] == {"EMAIL": 1}
+    assert IBAN_NAME not in json.dumps(response["result"]) and report["pii_masked"] == {"IBAN": 1}
 
 
 def test_the_server_validates_max_records(state_dir: Path) -> None:
@@ -741,3 +750,132 @@ def test_one_estimator_answers_for_all_three_quartiles() -> None:
     for value in (3.0, 1.0, 2.0):
         few.update(value)
     assert few.marker_values() == (1.0, 2.0, 3.0)
+
+
+# ------------------------------------------------------------------ the time limit
+
+
+class _SlowClock:
+    """A stand-in for the ``time`` module whose clock moves half a second each time it is read."""
+
+    def __init__(self) -> None:
+        self._now = 0.0
+
+    def monotonic(self) -> float:
+        now = self._now
+        self._now += 0.5
+        return now
+
+
+@pytest.mark.parametrize("kind", ["csv", "jsonl"])
+def test_the_scan_stops_at_the_time_limit_and_says_so(
+    kind: str, state_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body = "id,name,score\n" + good_rows(5000) if kind == "csv" else good_json_lines(5000)
+    path = state_dir / f"big.{kind}"
+    path.write_text(body, encoding="utf-8")
+    monkeypatch.setattr(quality_scan, "time", _SlowClock())  # the limit is two seconds: four looks at the clock
+
+    report = check_quality(path, max_seconds=2)
+
+    scope = report["scope"]
+    assert scope["complete"] is False and scope["max_seconds"] == 2
+    assert 700 < scope["records_examined"] < 1200  # the clock is looked at every 256 records
+    assert "2-second time limit" in scope["note"] and "max_seconds" in scope["note"]
+    assert report["summary"]["records_valid"] == scope["records_examined"]  # the report covers what was read
+
+
+def test_a_check_that_ends_inside_the_limit_is_complete(state_dir: Path) -> None:
+    (state_dir / "small.csv").write_text("id,name,score\n" + good_rows(50), encoding="utf-8")
+
+    scope = check_quality(state_dir / "small.csv", max_seconds=60)["scope"]
+
+    assert scope["complete"] is True and scope["note"] is None and scope["max_seconds"] == 60
+
+
+def test_without_a_time_limit_the_scope_has_no_limit_to_report(state_dir: Path) -> None:
+    (state_dir / "small.csv").write_text("id,name,score\n" + good_rows(50), encoding="utf-8")
+
+    assert "max_seconds" not in check_quality(state_dir / "small.csv")["scope"]
+
+
+@pytest.mark.parametrize("seconds", [0, -1, float("nan")])
+def test_the_time_limit_must_be_positive(seconds: float, state_dir: Path) -> None:
+    (state_dir / "small.csv").write_text("id,name,score\n" + good_rows(5), encoding="utf-8")
+
+    with pytest.raises(InvalidConfigurationException, match="max_seconds"):
+        check_quality(state_dir / "small.csv", max_seconds=seconds)
+
+
+def test_the_command_line_takes_a_time_limit(state_dir: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    (state_dir / "small.csv").write_text("id,name,score\n" + good_rows(50), encoding="utf-8")
+
+    assert main(["quality", str(state_dir / "small.csv"), "--max-seconds", "30"]) == 0
+    assert json.loads(capsys.readouterr().out)["scope"]["max_seconds"] == 30
+    assert main(["quality", str(state_dir / "small.csv"), "--max-seconds", "0"]) == 3
+
+
+def test_the_server_offers_a_time_limit_and_applies_it_by_default(state_dir: Path) -> None:
+    (state_dir / "small.csv").write_text("id,name,score\n" + good_rows(50), encoding="utf-8")
+    client = Client(create_mcp_server([state_dir]))
+
+    tools, default, short, too_long, none = client.handshake_and(
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        call(3, "check_quality", {"path": "small.csv"}),
+        call(4, "check_quality", {"path": "small.csv", "max_seconds": 5}),
+        call(5, "check_quality", {"path": "small.csv", "max_seconds": 601}),
+        call(6, "check_quality", {"path": "small.csv", "max_seconds": 0}),
+    )
+
+    quality = next(t for t in tools["result"]["tools"] if t["name"] == "check_quality")
+    spec = quality["inputSchema"]["properties"]["max_seconds"]
+    assert (spec["type"], spec["minimum"], spec["default"]) == ("integer", 1, 20)
+    assert default["result"]["structuredContent"]["scope"]["max_seconds"] == 20
+    assert short["result"]["structuredContent"]["scope"]["max_seconds"] == 5
+    assert too_long["result"]["isError"] is True and none["result"]["isError"] is True
+
+
+# ------------------------------------------------------------------ numbers with a decimal comma
+
+
+@pytest.mark.parametrize(
+    ("value", "kind"),
+    [
+        ("12,50", "float"),
+        ("1.234,56", "float"),
+        ("1.234.567", "float"),
+        ("3,5", "float"),
+        ("-0,25", "float"),
+        ("7", "integer"),
+        ("12,5,3", "string"),
+        ("1,2,3", "string"),
+        ("1.23,4.5", "string"),
+        ("12,", "string"),
+        (",5", "string"),
+    ],
+)
+def test_a_decimal_comma_is_a_number_when_the_delimiter_is_another(value: str, kind: str) -> None:
+    assert classify_text(value, decimal_comma=True) == kind
+
+
+def test_a_decimal_comma_is_text_unless_asked_for() -> None:
+    assert classify_text("12,50") == "string" and classify_text("1.234.567") == "string"
+
+
+def test_a_semicolon_table_with_decimal_commas_has_no_false_drift_and_gets_statistics(state_dir: Path) -> None:
+    amounts = ["1.234,56", "2", "3,5", "10,25"] * 4
+    (state_dir / "tutar.csv").write_text("ad;tutar\n" + "".join(f"k{n};{a}\n" for n, a in enumerate(amounts)), encoding="utf-8")
+
+    report = check_quality(state_dir / "tutar.csv")
+
+    field = by_name(report)["tutar"]
+    assert field["dominant_type"] == "number" and field["drift"] is False
+    assert field["types"] == {"float": 12, "integer": 4}
+    assert field["numeric_stats"]["mean"] == pytest.approx((1234.56 + 2 + 3.5 + 10.25) / 4, abs=1e-3)
+    assert not any("tutar" in issue for issue in report["issues"])
+
+
+def test_a_comma_table_keeps_a_quoted_comma_as_text(state_dir: Path) -> None:
+    (state_dir / "q.csv").write_text('id,tutar\n' + "".join(f'{n},"12,50"\n' for n in range(12)), encoding="utf-8")
+
+    assert by_name(check_quality(state_dir / "q.csv"))["tutar"]["types"] == {"string": 12}

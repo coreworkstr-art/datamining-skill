@@ -6,6 +6,39 @@ All notable changes are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **A list without a header row lost its first address.** A table whose first row held short names
+  was taken to have a header, and a first row such as `ada@example.com,Ada` or
+  `Lovelace, Ada <ada@example.com>` fits that description, so its address was left out of the
+  result. A first row with an `@` in it is data now.
+- **`--lowercase` left a stray dot on the Turkish dotted capital I.** `str.lower()` turns it into an
+  i followed by a combining dot, so one address written in capitals and in lower case came out as
+  two. It now gives a plain i.
+- **Windows-1254 text was read as Windows-1252.** The Turkish letters g-breve, dotted and dotless i
+  and s-cedilla came out as Icelandic letters, in field names and in addresses that contain them. A
+  file that is not UTF-8 and holds those bytes without the accented vowels of the Western languages
+  is now read as cp1254.
+- **Amounts with a decimal comma were reported as type drift.** In a semicolon-delimited export
+  (the usual Turkish or European layout) a column holding `12,50`, `7` and `1.234,56` was called a
+  mix of text and numbers and got no statistics. When the delimiter is not a comma, a decimal comma
+  and dots between thousands now make a number.
+- **`check_quality` could outlast a client's patience.** A million rows of twelve columns took a
+  minute, about where many clients give up on a tool call, and the server answers one request at a
+  time, so every call after it waited too. The MCP tool now stops after `max_seconds` (20 by
+  default, 1 to 600) and reports on what it read; the command line has an optional `--max-seconds`.
+
+### Changed
+
+- **Text with no recognised structure is read as plain lines instead of being refused.** A list of
+  addresses, a web page, an `.eml` or `.vcf` file, prose and a log with a layout of its own all
+  ended in "content matches no supported format", with no way to mine them. They are now profiled
+  as `text` (no columns) and mined line by line. An empty file, a file of only blank lines or mostly
+  control characters, and binary content are still refused, and `check_quality` still covers CSV,
+  TSV and JSON Lines only ("this file looks like text" for the rest).
+- README: the first commands work without a clone, the plugin's need for uv is stated, and the new
+  behaviour is described.
+
 ## [0.4.1] - 2026-11-06
 
 The package's code is the same as in 0.4.0. This release corrects the documentation that comes with

@@ -8,6 +8,7 @@ import json
 import random
 import tempfile
 import time
+import tracemalloc
 from pathlib import Path
 from typing import Any
 
@@ -234,13 +235,19 @@ def test_oversized_lines_are_skipped_without_corrupting_the_count(write_file: Wr
     assert profile.records.count == 21  # 20 normal rows + 1 oversized row
 
 
-def test_single_gigantic_line_is_rejected_not_buffered(write_file: WriteFile) -> None:
+def test_a_single_gigantic_line_is_read_as_text_without_being_buffered(write_file: WriteFile) -> None:
     profiler = create_profiler(ProfilerConfig(max_line_bytes=64 * KIB))
     path = write_file("blob.txt", b"x" * (5 * MIB))
 
-    with pytest.raises(UnsupportedDataFormatException):
-        profiler.profile(path)
+    tracemalloc.start()
+    try:
+        profile = profiler.profile(path)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
 
+    assert profile.data_format is DataFormat.TEXT and profile.records.count == 1
+    assert peak < 2 * MIB  # the 5 MiB line was never held in memory
 
 
 
@@ -251,12 +258,8 @@ def test_single_gigantic_line_is_rejected_not_buffered(write_file: WriteFile) ->
         pytest.param("binary.dat", bytes(range(256)) * 64, "binary", id="binary"),
         pytest.param("archive.csv", gzip.compress(b"a,b\n1,2\n" * 100), "gzip", id="gzip"),
         pytest.param("bundle.zip", b"PK\x03\x04" + b"\x00" * 64, "zip", id="zip"),
-        pytest.param(
-            "prose.txt",
-            b"This is just a sentence\nwith no structure at all\nreally\n",
-            "no supported format",
-            id="prose",
-        ),
+        pytest.param("blank.txt", b"\n  \n\t\n\n", "not readable text", id="blank-lines"),
+        pytest.param("control.txt", bytes(range(1, 9)) * 400, "not readable text", id="control-characters"),
     ],
 )
 def test_unrecognised_content_raises_custom_exception(

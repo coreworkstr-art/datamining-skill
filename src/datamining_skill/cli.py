@@ -85,7 +85,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     profile = commands.add_parser(
-        "profile", help="profile a CSV, JSON, JSONL or log file (also gzip, bzip2, xz, zip)"
+        "profile", help="profile a CSV, JSON, JSONL, log or text file (also gzip, bzip2, xz, zip)"
     )
     profile.add_argument("path", help="file to profile (read-only, never copied)")
     profile.add_argument("--config", help="TOML file with a [profiler] table")
@@ -98,7 +98,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "Read a CSV, TSV or JSON Lines file once, in constant memory, and report malformed "
             "records (by kind, with line numbers), how complete each field is, the value types "
             "found in each field and schema drift. Only counts and line numbers are reported, "
-            "never values. Stops after --max-records records and says whether it read the whole file."
+            "never values. Stops after --max-records records (or --max-seconds seconds, if given) and "
+            "says whether it read the whole file."
         ),
     )
     quality.add_argument("path", help="file to check (read-only)")
@@ -108,6 +109,13 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_MAX_RECORDS,
         metavar="N",
         help=f"stop after N records, 1 to {MAX_MAX_RECORDS:,} (default: {DEFAULT_MAX_RECORDS:,})",
+    )
+    quality.add_argument(
+        "--max-seconds",
+        type=float,
+        default=None,
+        metavar="N",
+        help="also stop after N seconds and report on what was read (default: no limit)",
     )
     quality.add_argument(
         "--workspace",
@@ -342,7 +350,9 @@ def _run_profile(args: argparse.Namespace) -> int:
 def _run_quality(args: argparse.Namespace) -> int:
     if not 1 <= args.max_records <= MAX_MAX_RECORDS:
         raise InvalidConfigurationException(f"--max-records must be between 1 and {MAX_MAX_RECORDS:,}")
-    report = check_quality(args.path, workspace=args.workspace, max_records=args.max_records)
+    report = check_quality(
+        args.path, workspace=args.workspace, max_records=args.max_records, max_seconds=args.max_seconds
+    )
     if args.mask:
         counts: Counter[str] = Counter()
         report = mask_value(report, counts)

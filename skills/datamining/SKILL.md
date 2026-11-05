@@ -1,6 +1,6 @@
 ---
 name: datamining
-description: Extract e-mail addresses, IPs, phone numbers, IDs or any pattern from very large local files (CSV, TSV, JSON, JSONL, logs; also gzip, bzip2, xz, zip and UTF-16 exports) and inspect unfamiliar data files, privately and in constant memory. Use when the user asks to list, extract, deduplicate or count addresses or other patterns in a big export, log or dataset, to profile or peek into a data file, or when a file is too large to open normally.
+description: Extract e-mail addresses, IPs, phone numbers, IDs or any pattern from very large local files (CSV, TSV, JSON, JSONL, logs, plain text; also gzip, bzip2, xz, zip and UTF-16 exports) and inspect unfamiliar data files, privately and in constant memory. Use when the user asks to list, extract, deduplicate or count addresses or other patterns in a big export, log or dataset, to profile or peek into a data file, or when a file is too large to open normally.
 license: MIT
 compatibility: Needs the datamining-skill MCP server (Python 3.11 or newer). The plugin starts it; see the README for manual setup.
 ---
@@ -16,7 +16,7 @@ network. They run through the `datamining` MCP server; its tools are listed belo
 | Tool | Use it to |
 | --- | --- |
 | `profile_dataset` | Inspect a file: format, encoding, columns or keys, size, estimated record count. Read-only and fast, whatever the size. |
-| `check_quality` | Read a CSV, TSV or JSON Lines file once and report malformed records (with line numbers), empty values per field, value types and schema drift. Counts only, never values; per field it also gives an approximate distinct count and, for numeric fields with at least 10 values, the mean, spread and quartiles. Read-only. Waits until done: it stops after `max_records` (default 1,000,000) and says whether it read everything. |
+| `check_quality` | Read a CSV, TSV or JSON Lines file once and report malformed records (with line numbers), empty values per field, value types and schema drift. Counts only, never values; per field it also gives an approximate distinct count and, for numeric fields with at least 10 values, the mean, spread and quartiles. Read-only. Waits until done: it stops after `max_records` (default 1,000,000) or `max_seconds` (default 20, because many clients give up on a call after about a minute), whichever comes first, and says whether it read everything. |
 | `mine_dataset` | Extract data into a `.csv`, `.jsonl` or `.ndjson` result. Resumes an interrupted run when called again with the same arguments. |
 | `mining_status` | Check a background run by the `job_id` that `mine_dataset` returned with `wait=false`, or list all runs of this server session. |
 | `cancel_mining` | Stop a background run (by `job_id`) after its current chunk. Nothing is lost; call `mine_dataset` again to resume. |
@@ -30,13 +30,16 @@ at the first one (the workspace).
 1. **Profile first.** Call `profile_dataset` on the source. Check `format`, `encoding`,
    `structure.fields` and `records.count` together with `records.unit`: a CSV record can span
    several lines (`structure.multiline_records`), so the count is then in lines. A compressed
-   file is judged by a sample and has no record count.
+   file is judged by a sample and has no record count. `format: "text"` means plain lines with
+   no columns, which is all that finding addresses needs.
 2. **Check the quality of a file you do not know.** Call `check_quality` on the source and read
    `summary` and `issues`: malformed records, fields that are mostly empty, fields that change type
    (`first_seen_line` says where), and an `encoding` marked as a guess. Tell the user what you
    found before mining, because it decides whether the result can be trusted. If `scope.complete`
-   is false, say that only the first records were checked. A file that is mostly broken is
-   refused as "no supported format": say so, do not retry.
+   is false, say that only the first records were checked (`scope.note` says whether the record
+   limit or the time limit stopped it). Plain text, and a table too broken to recognise, has no
+   columns: `check_quality` refuses it ("this file looks like text"); say so, do not retry. It can
+   still be mined.
 3. **Mine.** Call `mine_dataset` with `path` and `output_path`. The built-in extraction finds
    e-mail addresses and writes one `email` column. The result format follows the suffix of
    `output_path`.
@@ -61,7 +64,7 @@ at the first one (the workspace).
 | A CSV that will be opened in a spreadsheet | `csv_formula_guard: true` (prefixes cells that start with `= + - @`) |
 | Structured output for another program | an `output_path` ending in `.jsonl` |
 | To start over, ignoring earlier progress | `overwrite: true` (replaces the result file) |
-| A very large file | `wait: false`, then poll `mining_status` now and then (every 10 to 30 seconds is plenty) |
+| A file over about 1 GiB (mining runs at roughly 20 MiB/s, and many clients give up on a call after a minute) | `wait: false`, then poll `mining_status` now and then (every 10 to 30 seconds is plenty) |
 | Another pattern (IPs, phone numbers, order numbers) | `pattern` and `fields`, only if the server offers them |
 
 `pattern` and `fields` exist only when the server was started with `--allow-custom-patterns`.
@@ -101,7 +104,7 @@ Writing a pattern (Python regular expressions, matched line by line):
 
 | Message or symptom | Meaning and next step |
 | --- | --- |
-| `Unsupported data format ... matches no supported format` | Not CSV, JSON, JSONL or a recognised log. Profile shows the confidence per format; ask what the file is. |
+| `Unsupported data format ... is not readable text either` | The file holds only blank lines, or mostly control characters. Any other text is accepted (plain text is read line by line), so ask what the file is. |
 | `... binary content` | The file is not text. Do not retry. |
 | `... expands to more than ...` | A compressed file larger than the expansion limit once unpacked. Tell the user. |
 | `the output file already exists` | A result from another job is in the way. Choose another `output_path`, or `overwrite: true` if replacing it is intended. |

@@ -39,7 +39,9 @@ infrastructure  ──▶  application  ──▶  domain
 - **Single responsibility** - detection, estimation, streaming, guarding, logging and
   orchestration live in separate classes.
 - **Open/closed** - new formats are added by registering a `FormatHandler`; no
-  existing code changes.
+  existing code changes. The detector's optional `fallback` handler (`TextHandler` in
+  `create_profiler`) is asked only when every other handler declines, so text with no structure
+  is read as plain lines instead of being refused.
 - **Liskov** - every handler honours the same contract: consume at most
   `max_records` lines and return `None` when the sample is not its format.
 - **Interface segregation** - ports are small and role-specific.
@@ -56,7 +58,7 @@ chunks(head)  ──▶  EncodingDetector  ──▶  ContentGuard (binary / com
   │
   ▼
 FormatDetector: each FormatHandler analyses the head sample ──▶ best confidence wins
-  │                                                       none ≥ minimum ─▶ UnsupportedDataFormatException
+  │                          none ≥ minimum ─▶ TextHandler (plain lines) ─▶ none: UnsupportedDataFormatException
   ▼
 RecordEstimator: exact scan (small) | stratified windows (large) | head window (UTF-16/32)
   │
@@ -620,7 +622,8 @@ and adds no data-processing logic of its own.
 
 `check_quality` answers "what is wrong with this file" in one pass and constant memory, without
 mining it. The profiler runs first, for the format, the encoding, the delimiter and the header
-(so a file too damaged to be recognised is refused before it can be checked). `FileStreamReader`
+(so a table too damaged to be recognised, which is read as plain text, is refused before it can
+be checked). `FileStreamReader`
 then yields decoded lines from the byte after the byte-order mark; a line over the 1 MiB cap is
 flagged and counted, never parsed. CSV goes through the standard `csv` module in strict mode,
 so a broken quote is an error and not silently accepted; JSON Lines through `json.loads`.
@@ -635,8 +638,9 @@ moments (Welford and Pébay) and P² quartile estimators. They take a few kiloby
 whatever the file's size and report only aggregates: `numeric_stats` appears for a numeric field
 with at least ten values, and the exact minimum and maximum are never reported. A compressed
 source is checked through the same temporary sample as `profile`, 64 MiB
-instead of 4. The statistics are about the records read: with `max_records` the report says that
-it stopped.
+instead of 4. The statistics are about the records read: with `max_records`, or with `max_seconds`
+(a clock look every 256 records; the MCP tool sets 20, because a client usually gives up on a call
+after a minute and the server answers one request at a time), the report says that it stopped.
 
 ### Protocol: one server, two eras
 

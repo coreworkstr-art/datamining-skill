@@ -21,9 +21,14 @@ _FIELD_SIZE_LIMIT = 4 * 1024 * 1024
 
 
 def _looks_like_column_name(cell: str) -> bool:
-    """Short and not starting with a digit; rules out numbers, dates and free-text fragments."""
+    """Short, not starting with a digit and without an ``@``.
+
+    That rules out numbers, dates, free-text fragments and e-mail addresses: a first row such as
+    ``ada@example.com,Ada`` is data (a list without a header), and taking it for a header would
+    drop its address from the result.
+    """
     name = cell.strip()
-    return 0 < len(name) <= _MAX_COLUMN_NAME_CHARS and not name[0].isdigit()
+    return 0 < len(name) <= _MAX_COLUMN_NAME_CHARS and not name[0].isdigit() and "@" not in name
 
 
 class CsvHandler:

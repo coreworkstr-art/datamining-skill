@@ -72,10 +72,10 @@ class ServerIdentity:
 
 
 INSTRUCTIONS = (
-    "Local-only data mining. Use profile_dataset to inspect a large CSV, JSON, JSONL or log "
-    "file (gzip, bzip2, xz and zip too), then mine_dataset to extract data from it into a CSV "
-    "or JSONL file: e-mail addresses by default, with unique and lowercase for a clean list. "
-    "Check the result with preview_result. For a very large file call mine_dataset with "
+    "Local-only data mining. Use profile_dataset to inspect a large CSV, JSON, JSONL, log or "
+    "plain text file (gzip, bzip2, xz and zip too), then mine_dataset to extract data from it into "
+    "a CSV or JSONL file: e-mail addresses by default, with unique and lowercase for a clean list. "
+    "Check the result with preview_result. For a file over about 1 GiB call mine_dataset with "
     "wait=false and poll mining_status. Files must be inside the directories this server was "
     "started with. Interrupted runs resume when mine_dataset is called again with the same "
     "arguments."

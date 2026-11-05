@@ -14,7 +14,7 @@ contents or full paths.
 | Tool | Reads | Writes | Typical use |
 | --- | --- | --- | --- |
 | [`profile_dataset`](#profile_dataset) | the source (a bounded sample) | nothing (a compressed file: a short-lived sample in `.scratch/`) | Look before mining |
-| [`check_quality`](#check_quality) | the source, once (up to `max_records`) | nothing (a compressed file: a short-lived sample in `.scratch/`) | Find malformed rows, gaps and type drift |
+| [`check_quality`](#check_quality) | the source, once (up to `max_records` or `max_seconds`) | nothing (a compressed file: a short-lived sample in `.scratch/`) | Find malformed rows, gaps and type drift |
 | [`mine_dataset`](#mine_dataset) | the source | the result file, `.scratch/` | Extract data |
 | [`mining_status`](#mining_status) | nothing | nothing | Follow a background run |
 | [`cancel_mining`](#cancel_mining) | nothing | nothing | Stop a background run |
@@ -26,7 +26,7 @@ Inspect a file without reading it fully into memory.
 
 | Argument | Type | Description |
 | --- | --- | --- |
-| `path` | string, required | CSV, TSV, JSON, JSONL/NDJSON or log file; also gzip, bzip2, xz or zip compressed |
+| `path` | string, required | CSV, TSV, JSON, JSONL/NDJSON, log or plain text file; also gzip, bzip2, xz or zip compressed |
 
 Returns, for example:
 
@@ -45,8 +45,10 @@ Returns, for example:
 }
 ```
 
-- `format` is `csv`, `json`, `jsonl` or `log`. `structure.fields` lists the columns, the keys of
-  the JSON, or the fields of the recognised log layout.
+- `format` is `csv`, `json`, `jsonl`, `log` or `text`. `structure.fields` lists the columns, the
+  keys of the JSON, or the fields of the recognised log layout. `text` is what is left when none
+  of the others fits (an address list, a web page, an e-mail message, a log with a layout of its
+  own): it has no fields, and its lines are searched all the same.
 - `records.count` is in `records.unit`: `records` for JSON Lines (one line, one record), `lines`
   elsewhere, because a quoted CSV value can span several lines (`structure.multiline_records`).
   A count is exact for files up to 16 MiB and extrapolated from evenly spread windows above that.
@@ -56,7 +58,7 @@ Returns, for example:
   `compression` (for example `gzip`) and `sample.scope`, and `records.count` is `null`.
 - UTF-16/32 files are profiled in place; their count is estimated from the head.
 
-Errors: the file is empty, binary, in no recognised format, damaged, or outside the allowed
+Errors: the file is empty (or only blank lines), binary, damaged, or outside the allowed
 directories.
 
 ## `check_quality`
@@ -67,6 +69,7 @@ Read a CSV, TSV or JSON Lines file once, in constant memory, and report what is 
 | --- | --- | --- | --- |
 | `path` | string, required | | CSV, TSV or JSON Lines file; also gzip, bzip2, xz or zip compressed (checked on its first 64 MiB once decompressed) |
 | `max_records` | integer | 1,000,000 | Stop after this many records, 1 to 10,000,000. The call waits until the check is done |
+| `max_seconds` | integer | 20 | Stop reading after this many seconds, 1 to 600, and report on what was read (`scope.complete` is then false) |
 
 Returns, for example:
 
@@ -88,7 +91,7 @@ Returns, for example:
     "10 of 1,000,000 records are malformed: too_few_columns (10)",
     "field 'age' mixes number (979,989) and string (1); string first appears on line 700,002"
   ],
-  "scope": {"records_examined": 1000000, "lines_read": 1000001, "bytes_read": 65011234, "max_records": 1000000, "complete": true, "note": null},
+  "scope": {"records_examined": 1000000, "lines_read": 1000001, "bytes_read": 65011234, "max_records": 1000000, "max_seconds": 20, "complete": true, "note": null},
   "encoding": {"name": "utf-8", "has_bom": false, "confidence": 0.99},
   "file": {"name": "export.csv", "size_bytes": 65011301, "size_human": "62.0 MiB"}
 }
@@ -101,7 +104,8 @@ Returns, for example:
   left out of the field statistics. `examples` lists the first five lines, never their content.
 - **Types** of a CSV cell are read from its text: `integer`, `float`, `boolean` (`true` or
   `false`), `date`, `datetime`, `string`, `empty`, and `null` for tokens such as `NULL`, `n/a` or
-  `\N`. A JSON value keeps its JSON type, so `"42"` is a `string`; `object` and `array` are also
+  `\N`. In a table whose delimiter is not a comma (a Turkish or European export, usually with
+  semicolons) a decimal comma is a number too: `12,50`, `1.234,56` and `1.234.567` are `float`s. A JSON value keeps its JSON type, so `"42"` is a `string`; `object` and `array` are also
   types. **Drift** means a field holds values of more than one kind once integers and floats count
   as one kind (numbers) and dates and datetimes as another (points in time); empty and null do not
   count. `first_seen_line` says where each type first appeared, which is where to start looking.
@@ -117,20 +121,24 @@ Returns, for example:
   one of the values. P² is less accurate on a column that is sorted or drifts steadily.
 - These statistics are what makes a check slow: measured on a laptop, about 1 MiB/s on a file of
   mostly numbers and about 2 MiB/s on one of text, so a million rows of a dozen columns take a
-  minute or two. `max_records` bounds the time.
+  minute or two. `max_records` and `max_seconds` bound the time.
 - An `encoding` with a confidence below 0.9 is a guess (the file is not valid UTF-8) and comes
   with a first entry in `issues`. `undecodable_lines` counts lines with bytes that the detected
   encoding could not decode.
 - At most 512 fields are followed (the rest is noted in `issues`), and `issues` lists at most 25
   findings, those about the whole file first.
-- `scope.complete` is false when the check stopped at `max_records`, or looked only at the
-  sample of a compressed file.
+- `scope.complete` is false when the check stopped at `max_records` or at `max_seconds` (the note
+  says which), or looked only at the sample of a compressed file. The statistics are then about the
+  records read. `max_seconds` exists because many clients (Claude Desktop and Cursor, for example)
+  give up on a tool call after about a minute, and this server answers one request at a time: a
+  longer check would also hold up every call after it. It is 20 by default; raise it if your
+  client waits longer.
 - The field names, which come from the data, are [masked](#masking-and-the-audit-log) by default
   and `pii_masked` counts the replacements.
 
-Errors: the file is empty, binary, in no recognised format, or in a format other than CSV, TSV or
-JSON Lines (a log, a single JSON document). The format is detected before anything else, so a file
-that is mostly broken is refused as "no supported format" rather than checked.
+Errors: the file is empty, binary, or in a format other than CSV, TSV or JSON Lines (a log, a
+single JSON document, plain text: `this file looks like text`). The format is detected before
+anything else, so a table that is mostly broken is read as text and refused rather than checked.
 
 ## `mine_dataset`
 

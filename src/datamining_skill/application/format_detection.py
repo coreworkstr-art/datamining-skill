@@ -25,7 +25,9 @@ class FormatDetector:
     """Selects the best-fitting ``FormatHandler``.
 
     Every handler analyses the same bounded head sample through its own stream. The highest
-    confidence wins; ties go to extension agreement, then registration order.
+    confidence wins; ties go to extension agreement, then registration order. ``fallback`` is
+    asked only when no handler reaches the minimum confidence: it reads the file as what is left
+    (plain text) instead of refusing it.
     """
 
     def __init__(
@@ -33,12 +35,14 @@ class FormatDetector:
         handlers: Sequence[FormatHandler],
         streams: StreamReader,
         config: ProfilerConfig,
+        fallback: FormatHandler | None = None,
     ) -> None:
         if not handlers:
             raise ValueError("at least one format handler is required")
         self._handlers = tuple(handlers)
         self._streams = streams
         self._config = config
+        self._fallback = fallback
 
     def detect(self, path: Path, encoding: EncodingInfo) -> FormatMatch:
         extension = path.suffix.lower()
@@ -63,12 +67,23 @@ class FormatDetector:
                 )
 
         if not scored:
-            raise UnsupportedDataFormatException(
-                path.name,
+            if self._fallback is not None:
+                with closing(
+                    self._streams.lines(
+                        path, encoding, encoding.bom_length, self._config.head_sample_bytes
+                    )
+                ) as lines:
+                    fallback_analysis = self._fallback.analyze(lines, self._config.structure_sample_records)
+                if fallback_analysis is not None:
+                    return FormatMatch(self._fallback.data_format, fallback_analysis)
+            reason = (
                 "content matches no supported format "
                 f"(minimum confidence {self._config.min_format_confidence:.2f}; "
-                f"{', '.join(confidence_report)})",
+                f"{', '.join(confidence_report)})"
             )
+            if self._fallback is not None:
+                reason += " and is not readable text either (only blank lines, or mostly control characters)"
+            raise UnsupportedDataFormatException(path.name, reason)
 
         _, _, _, handler, analysis = max(scored, key=lambda item: item[:3])
         return FormatMatch(handler.data_format, analysis)

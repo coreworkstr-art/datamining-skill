@@ -49,14 +49,21 @@ _NULL_TOKENS = frozenset({"null", "none", "nan", "n/a", "na", "nil", "\\n"})  # 
 _BOOLEANS = frozenset({"true", "false"})
 _INTEGER = re.compile(r"[+-]?\d{1,30}")
 _FLOAT = re.compile(r"[+-]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?")
+# a number written with a decimal comma and dots between the thousands: 12,50  1.234,56  1.234.567
+_DECIMAL_COMMA = re.compile(r"[+-]?(?:\d{1,3}(?:\.\d{3})+|\d+)(?:,\d+)?")
 _DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _DATETIME = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2})?")
 _NUMBER_START = frozenset("0123456789+-.")
 
 
-def classify_text(value: str) -> str:
+def classify_text(value: str, *, decimal_comma: bool = False) -> str:
     """The type of a CSV cell: ``empty``, ``null`` (a token such as ``NULL``), a number, a
-    boolean, a date, a date and time, or ``string``."""
+    boolean, a date, a date and time, or ``string``.
+
+    ``decimal_comma`` also takes ``12,50`` and ``1.234,56`` for numbers. It is for a table whose
+    delimiter is not a comma (a Turkish or European export, usually with semicolons), where a
+    comma inside a cell is a decimal point and not a second value.
+    """
     stripped = value.strip()
     if not stripped:
         return EMPTY
@@ -64,6 +71,8 @@ def classify_text(value: str) -> str:
         if _INTEGER.fullmatch(stripped):
             return INTEGER
         if _FLOAT.fullmatch(stripped):
+            return FLOAT
+        if decimal_comma and _DECIMAL_COMMA.fullmatch(stripped):
             return FLOAT
         if len(stripped) >= 10 and stripped[4] == "-":
             if _DATE.fullmatch(stripped):
@@ -107,6 +116,15 @@ def unique_names(names: Sequence[str]) -> list[str]:
     return result
 
 
+def _number_from_text(text: str) -> float:
+    """The value of a number written as text; a decimal comma, and dots between thousands, are read as such."""
+    if "," in text:
+        text = text.replace(".", "").replace(",", ".")
+    elif text.count(".") > 1:
+        text = text.replace(".", "")
+    return float(text)
+
+
 def _canonical_bytes(raw_value: object) -> bytes | None:
     """A value as the bytes that are hashed to count distinct values; None if it has none."""
     if isinstance(raw_value, str):
@@ -140,7 +158,7 @@ class _FieldStats:
             self.hll.add(encoded)
         if kind in (INTEGER, FLOAT) and isinstance(raw_value, int | float | str):
             try:
-                number = float(raw_value)
+                number = _number_from_text(raw_value) if isinstance(raw_value, str) else float(raw_value)
             except (ValueError, OverflowError):
                 return
             if math.isfinite(number):
@@ -149,11 +167,17 @@ class _FieldStats:
                 self.moments.update(number)
                 self.quantiles.update(number)
 
-class QualityAccumulator:
-    """Counts what a stream of records looks like; see the module docstring."""
 
-    def __init__(self, data_format: str) -> None:
+class QualityAccumulator:
+    """Counts what a stream of records looks like; see the module docstring.
+
+    ``decimal_comma`` is for a table whose delimiter is not a comma: a cell such as ``12,50`` is
+    then a number (see ``classify_text``).
+    """
+
+    def __init__(self, data_format: str, *, decimal_comma: bool = False) -> None:
         self._format = data_format
+        self._decimal_comma = decimal_comma
         self.valid = 0
         self.blank_lines = 0
         self.undecodable_lines = 0
@@ -194,7 +218,7 @@ class QualityAccumulator:
         tracked = min(expected, MAX_TRACKED_FIELDS)
         for index in range(tracked):
             cell = row[index].strip()  # stripped once: the type and the distinct count both ignore the margins
-            self._fields[self._columns[index]].add(classify_text(cell), line, cell)
+            self._fields[self._columns[index]].add(classify_text(cell, decimal_comma=self._decimal_comma), line, cell)
         self.untracked_values += expected - tracked
 
     def add_object(self, line: int, record: Mapping[str, Any]) -> None:

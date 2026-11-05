@@ -14,6 +14,7 @@ class DataFormat(enum.StrEnum):
     JSONL = "jsonl"
     JSON = "json"
     LOG = "log"
+    TEXT = "text"  # no structure recognised: lines of plain text
 
 
 class TextLine(NamedTuple):

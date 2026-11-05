@@ -1,7 +1,8 @@
 # DataMining Skill
 
-DataMining Skill pulls data out of very large text files (CSV, TSV, JSON, JSON Lines and logs) on an
-ordinary computer. It is a command-line tool, a Python library and an MCP server in one.
+DataMining Skill pulls data out of very large text files (CSV, TSV, JSON, JSON Lines, logs and
+plain text) on an ordinary computer. It is a command-line tool, a Python library and an MCP server
+in one.
 
 The file is read in pieces, so memory use follows the settings and not the size of the file.
 Progress is saved as it goes: if a run is interrupted, the same command carries on from the last
@@ -59,7 +60,13 @@ git clone https://github.com/coreworkstr-art/datamining-skill && cd datamining-s
 pip install .
 ```
 
-Check it works: `datamining-skill --version`, then `datamining-skill profile examples/contacts.csv`.
+Check it works: `datamining-skill --version`. If the command is not found, see
+[Troubleshooting](docs/troubleshooting.md#installing-and-connecting) or run it as
+`python -m datamining_skill`.
+
+The examples below use a small sample file, `examples/contacts.csv`. A clone has it; otherwise
+[download it](https://raw.githubusercontent.com/coreworkstr-art/datamining-skill/main/examples/contacts.csv)
+or use any CSV, JSON, log or text file of your own.
 
 ## Quick start
 
@@ -98,10 +105,11 @@ each field, and fields whose values change type (a column of numbers with a few 
 field also gets an approximate count of its distinct values and, if it is numeric with at least ten
 values, its mean, spread and estimated quartiles. It keeps counts, line numbers and small summaries
 of fixed size, never values, so its memory does not grow with the file. It checks up to 1,000,000
-records by default (`--max-records`) and says whether it read the whole file. On a laptop it takes
-about 30 seconds for a million CSV rows with six columns, and about 20 seconds for half a million
-JSON Lines records. The file's format is detected first, so a file that is mostly broken is refused
-as "no supported format" before it can be checked.
+records by default (`--max-records`, and `--max-seconds` if you want a time limit) and says whether
+it read the whole file. On a laptop it takes about 30 seconds for a million CSV rows with six
+columns, and about 20 seconds for half a million JSON Lines records. The file's format is detected
+first: text with no table in it (a list of addresses, a web page, or a table too broken to
+recognise) has no columns to check, so `quality` says so; it can still be mined.
 
 If `mine` is interrupted, run the same command again: it resumes where it stopped. Run it again
 after it finished and it says `already_complete` instead of doing the work twice. Changing any
@@ -114,8 +122,8 @@ standard input/output, so an assistant can inspect and mine local files on your 
 
 | Tool | What it does |
 | --- | --- |
-| `profile_dataset` | Format, encoding, columns or keys, size and estimated record count of a CSV, TSV, JSON, JSONL or log file; also gzip, bzip2, xz and zip files. Read-only. |
-| `check_quality` | Reads a CSV, TSV or JSON Lines file once and reports malformed records (by kind, with line numbers), empty or missing values per field, the value types found and schema drift, plus an approximate distinct count per field and, for numeric fields, the mean, spread and quartiles. Counts, line numbers and aggregates only, never values. Read-only. |
+| `profile_dataset` | Format, encoding, columns or keys, size and estimated record count of a CSV, TSV, JSON, JSONL, log or plain text file; also gzip, bzip2, xz and zip files. Read-only. |
+| `check_quality` | Reads a CSV, TSV or JSON Lines file once and reports malformed records (by kind, with line numbers), empty or missing values per field, the value types found and schema drift, plus an approximate distinct count per field and, for numeric fields, the mean, spread and quartiles. Counts, line numbers and aggregates only, never values. Stops after `max_records` records or `max_seconds` seconds (default 20), whichever comes first, so a client that gives up after a minute still gets an answer. Read-only. |
 | `mine_dataset` | Extracts data (e-mail addresses by default) into a `.csv`, `.jsonl` or `.ndjson` result in memory-bounded chunks with checkpoints. `unique`, `lowercase`, `csv_formula_guard` and `overwrite` options. With `wait=false` it runs in the background and returns a job id. |
 | `mining_status` | Progress and result of a background run, or a list of the runs of this session. |
 | `cancel_mining` | Stops a background run after its current chunk; calling `mine_dataset` again resumes it. |
@@ -129,8 +137,9 @@ refused. The first `--allow-dir` is the workspace for relative paths.
 
 ### Claude Code
 
-The repository is a Claude Code plugin: it starts the server for you (with
-[uv](https://docs.astral.sh/uv/), restricted to the project directory) and adds the
+The repository is a Claude Code plugin: it starts the server for you through
+[uv](https://docs.astral.sh/uv/) (install it first; without it, register the server yourself, below),
+restricted to the project directory, and adds the
 [`datamining` skill](skills/datamining/SKILL.md), which tells Claude when to use the tools and how
 to choose their arguments.
 
@@ -231,7 +240,7 @@ untrusted; see [docs/privacy-and-security.md](docs/privacy-and-security.md) for 
 
 ```text
 datamining-skill profile PATH [--config FILE]
-datamining-skill quality PATH [--max-records N] [--workspace DIR] [--mask]
+datamining-skill quality PATH [--max-records N] [--max-seconds N] [--workspace DIR] [--mask]
 datamining-skill mine SOURCE OUTPUT [--workspace DIR] [--unique] [--lowercase]
                                     [--pattern REGEX [--fields a,b]] [--overwrite]
                                     [--csv-formula-guard] [--json-escapes {auto,on,off}]
@@ -245,7 +254,7 @@ datamining-skill mcp [--allow-dir DIR ...] [--allow-custom-patterns]
 | Option | Meaning |
 | --- | --- |
 | `--unique` | Write each record once, across the whole file and across resumed runs. |
-| `--lowercase` | Lower-case every value. With `--unique`, addresses differing only in case count once. |
+| `--lowercase` | Lower-case every value. With `--unique`, addresses differing only in case count once (the Turkish dotted capital I counts as a plain i). |
 | `--pattern`, `--fields` | Extract your own regular expression; each capture group becomes a column named by `--fields`. Repeat a group with `(?:...)`, not `(...)`. |
 | `--overwrite` | Discard earlier progress and replace an existing output file. |
 | `--csv-formula-guard` | Prefix CSV cells that start with `= + - @` so a spreadsheet does not run them. |
@@ -255,6 +264,7 @@ datamining-skill mcp [--allow-dir DIR ...] [--allow-custom-patterns]
 | `--workspace` | Where the `.scratch/` folder with state and scratch files lives (default: the current directory). |
 | `--rows` | How many records `preview` shows (1 to 200, default 20). |
 | `--max-records` | `quality` stops after this many records (default 1,000,000) and says whether it read the whole file. |
+| `--max-seconds` | `quality` also stops after this many seconds and says so (default: no limit; the MCP tool stops after 20). |
 | `--sample` | `preview` draws its records from across the whole file (the first 64 MiB at most) instead of taking the first ones. |
 | `--seed` | Makes `preview --sample` repeatable. |
 | `--mask` | `preview` and `quality` replace e-mail, IP, card, T.C. kimlik and IBAN numbers and secrets by tags such as `[EMAIL]`. |
@@ -450,8 +460,16 @@ bound by the interpreter. Mining runs on one thread by default ([Limitations](#l
   set `OrchestratorConfig(max_workers=...)` to mine chunks on several threads, but the work is
   CPU-bound Python under the interpreter lock, so the gain measured was small (at most about 1.2
   times). Unique mining, the command line and the MCP tools always mine one chunk at a time.
-- Mining supports ASCII-compatible encodings (ASCII, UTF-8, cp1252, ISO-8859-1) directly, and
-  UTF-16/32 through the conversion copy, which needs temporary disk space for the converted text.
+- Mining supports ASCII-compatible encodings (ASCII, UTF-8, cp1252, cp1254 for Turkish,
+  ISO-8859-1) directly, and UTF-16/32 through the conversion copy, which needs temporary disk space
+  for the converted text. A file that is not UTF-8 has its encoding guessed (the profile says how
+  sure it is); addresses made of plain ASCII letters come out right whatever the guess.
+- Text in which no table, log or JSON layout fits (a list of addresses, a web page, an e-mail
+  message, a log with a layout of its own) is read as plain lines (`format` is `text`): it has no
+  columns, so `quality` cannot check it, but it can be profiled and mined.
+- A table's first row is taken for a header when it holds short names that start with a letter and
+  contain no `@`. A list whose first row holds an address keeps it as data; a headerless table whose
+  first row is plain words (`Ada,Istanbul`) loses that row, so give such a file a header row.
 - The CLI, `run_mining` and the MCP tools hold a cross-process lock per job, so a second process
   on the same job is refused ("already running"). Code that drives `create_orchestrator` directly
   must provide its own single-writer guarantee.

@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
-from datamining_skill import DataFormat, DataProfiler, UnsupportedDataFormatException, run_mining
+from datamining_skill import DataFormat, DataProfiler, run_mining
 from tests.conftest import WriteFile
 
 PEOPLE = [{"id": i, "name": f"Ada {i}", "email": f"emp{i}@internal.corp.test"} for i in range(300)]
@@ -55,8 +53,7 @@ def test_json_lines_are_still_reported_as_json_lines(profiler: DataProfiler, wri
 def test_text_that_only_starts_with_a_bracket_is_not_json(profiler: DataProfiler, write_file: WriteFile) -> None:
     path = write_file("notes.txt", "[draft] remember to call back\nand then email the team\n")
 
-    with pytest.raises(UnsupportedDataFormatException):
-        profiler.profile(path)
+    assert profiler.profile(path).data_format is DataFormat.TEXT  # read as lines, not taken for JSON
 
 
 def test_a_json_document_is_mined_in_full_including_escaped_addresses(write_file: WriteFile, state_dir: object) -> None:

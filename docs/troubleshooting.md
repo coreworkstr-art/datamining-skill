@@ -30,8 +30,8 @@ symbolic links are resolved. Relative paths start at the first allowed directory
 
 | Message | What it means and what to do |
 | --- | --- |
-| `Unsupported data format ... content matches no supported format` | The head of the file looks like no supported format. The message lists the confidence per format. Check that the file is text and not a database export or an Excel workbook (`.xlsx` is a zip of XML files: export it to CSV first). A file in which most rows are damaged is refused the same way, because the format is detected before anything is checked; look at its first lines, or cut a good sample out of it, and run `quality` on that. |
-| `... quality checks cover CSV, TSV and JSON Lines files` | `quality` was given a log or a single JSON document. Use `profile` for those. |
+| `Unsupported data format ... is not readable text either` | The file is empty of text (only blank lines) or mostly control characters, so it is not text either. Check that it is a text file and not a database export or an Excel workbook (`.xlsx` is a zip of XML files: export it to CSV first). Any other text is accepted: when no table, log or JSON layout fits, it is read as plain lines (`format` is `text`), which is enough to mine addresses out of a list, a web page or an e-mail message. |
+| `... quality checks cover CSV, TSV and JSON Lines files` | `quality` was given a log, a single JSON document or plain text (`this file looks like text`: it has no columns to check). Use `profile` for those; `mine` still works on them. A table in which most rows are damaged ends up here too, because the layout is detected before anything is checked: look at its first lines, or cut a good sample out of it, and run `quality` on that. |
 | `... binary content (NUL bytes ...)` | The file is not text. |
 | `... gzip-compressed content; decompress or convert it ...` | Only appears for formats that cannot be converted (zstandard, 7-zip, Parquet, PDF, ...). gzip, bzip2, xz and single-file zip are handled for you. |
 | `... zip archive with N files` | Extract the one file you want to mine first. |
@@ -58,7 +58,14 @@ in it, or with a bare host (`user@localhost`). For JSON files it decodes `\uXXXX
 (`--json-escapes`); for other sources it searches the text as written, so an address that is
 HTML-escaped or base64-encoded is not found. A custom `--pattern` can be written for any of these.
 
-**Different case, same address.** Add `--lowercase` together with `--unique`.
+**Different case, same address.** Add `--lowercase` together with `--unique`. (The Turkish dotted
+capital I is turned into a plain i, so `MUSTERI@...` written with it matches the lower-case form.)
+
+**The first address of a list is missing.** A table is taken to have a header row when its first
+row holds short names that start with a letter and contain no `@`. A first row with an address in
+it is data, so a list of `address,name` lines keeps its first address. A headerless table whose
+first row is made of plain words (`Ada,Istanbul`) is still taken to have a header; give such a
+file a header row of its own.
 
 **A record count that does not match the number of CSV rows.** The count of a CSV is in lines.
 A quoted value with a line break makes a record span several lines; `profile` flags this as
@@ -73,9 +80,11 @@ may treat it as a formula. Mine with `--csv-formula-guard`.
 ## Reading a quality report
 
 **`quality` says the encoding is a guess.** The file is not valid UTF-8, and the detector fell
-back to cp1252 or ISO-8859-1, which decode every byte. A UTF-8 file with a few corrupt bytes ends
-up here, and its accented or Turkish letters are then read wrongly. Find the bad bytes and
-re-save the file as UTF-8.
+back to cp1252, cp1254 (Turkish, chosen when the letters g-breve, dotted and dotless i and
+s-cedilla appear without the accented vowels of the Western languages) or ISO-8859-1, which
+decode every byte. A UTF-8 file with a few corrupt bytes ends up here, and its accented letters
+are then read wrongly. Find the bad bytes and re-save the file as UTF-8. Addresses made of plain
+ASCII letters are read correctly whatever the guess.
 
 **A field is reported as drifting but looks fine.** Drift means the field holds more than one
 kind of value: numbers, words, dates, booleans. A column of identifiers such as `00123`, `A-17`
@@ -86,8 +95,10 @@ sometimes `"5"`. `first_seen_line` shows where the second kind starts.
 CSV value that spans lines is one record, blank lines are listed apart, and a malformed row is
 counted under `malformed` and left out of the field statistics.
 
-**`complete` is false.** The check stopped at `--max-records` (raise it), or the source is
-compressed and only its first 64 MiB were read.
+**`complete` is false.** The check stopped at `--max-records` (raise it), at the time limit
+(`max_seconds`: 20 seconds in the MCP tool, none on the command line unless you pass
+`--max-seconds`; the note says which), or the source is compressed and only its first 64 MiB
+were read. What was read is reported correctly; it is the part of the file that was checked.
 
 ## Speed
 

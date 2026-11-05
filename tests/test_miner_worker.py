@@ -270,14 +270,15 @@ def test_worker_writes_only_its_chunks_matches_to_the_scratch_file(
 
 
 def test_first_chunk_skips_bom_and_header(state_dir: Path, write_file: WriteFile) -> None:
-    body = "id,contact\n" + "".join(f"{i},emp{i}@internal.corp.test\n" for i in range(5))
-    path = write_file("data.csv", b"\xef\xbb\xbf" + body.replace("contact", "it.desk@header.corp.test").encode())
+    header = "id,it.desk@header.corp.test\n"
+    body = "".join(f"{i},emp{i}@internal.corp.test\n" for i in range(5))
+    path = write_file("data.csv", b"\xef\xbb\xbf" + (header + body).encode())
     profile = create_profiler().profile(path)
-    assert profile.data_offset > 3  # BOM + header
+    data_offset = 3 + len(header)  # the BOM and the header row; the profiler would take this header for data
     scratch = LocalScratchStore(state_dir, allowed_roots=[SCRATCH_ROOT])
 
     result = make_worker(scratch).process(
-        SourceDescriptor(path, profile.encoding, profile.data_offset),
+        SourceDescriptor(path, profile.encoding, data_offset),
         ChunkMetadata(1, 0, profile.size_bytes),
     )
 

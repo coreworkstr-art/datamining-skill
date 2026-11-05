@@ -475,6 +475,14 @@ def _chain_error() -> InvalidConfigurationException:
     )
 
 
+def _lowered(value: str) -> str:
+    """``value`` in lower case, where the Turkish dotted capital I (U+0130) gives a plain i.
+
+    ``str.lower`` turns that letter into an i followed by a combining dot, so one address written
+    in capitals and in lower case would come out as two different addresses.
+    """
+    return value.lower() if value.isascii() else value.replace("\u0130", "i").lower()
+
 class RegexExtractor:
     """Yields every regex match per line: the whole match, or the group tuple if the pattern has
     groups (unmatched optional groups become empty strings).
@@ -531,7 +539,7 @@ class RegexExtractor:
             return ()
         records: list[tuple[str, ...]] = [(value,) for value in found] if self._regex.groups < 2 else found
         if self._lowercase:
-            return [tuple(value.lower() for value in record) for record in records]
+            return [tuple(_lowered(value) for value in record) for record in records]
         return records
 
     def _matches_before(self, line: str, start: int, stop: int) -> Iterator[Sequence[str]]:
@@ -542,7 +550,7 @@ class RegexExtractor:
                 values: tuple[str, ...] = (match.group(0),)
             else:
                 values = tuple(group or "" for group in match.groups())
-            yield tuple(value.lower() for value in values) if self._lowercase else values
+            yield tuple(_lowered(value) for value in values) if self._lowercase else values
 
 
 _LOCAL_REACH = 65  # a local part has at most 64 characters; the one before them must not match
@@ -577,7 +585,8 @@ class EmailExtractor:
         count = line.count("@", start)
         if not count:
             return ()
-        regex = self._ascii if line.isascii() else self._unicode
+        ascii_line = line.isascii()
+        regex = self._ascii if ascii_line else self._unicode
         if stop is None and len(line) - start < count * _DENSE:
             found = regex.findall(line, start)
         else:
@@ -585,7 +594,9 @@ class EmailExtractor:
         if not found:
             return ()
         if self._lowercase:
-            return [(address.lower(),) for address in found]
+            if ascii_line:
+                return [(address.lower(),) for address in found]
+            return [(_lowered(address),) for address in found]
         return [(address,) for address in found]
 
     @staticmethod

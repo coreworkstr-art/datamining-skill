@@ -4,5 +4,6 @@ from datamining_skill.infrastructure.handlers.csv_handler import CsvHandler
 from datamining_skill.infrastructure.handlers.json_handler import JsonDocumentHandler
 from datamining_skill.infrastructure.handlers.jsonl_handler import JsonlHandler
 from datamining_skill.infrastructure.handlers.log_handler import LogHandler
+from datamining_skill.infrastructure.handlers.text_handler import TextHandler
 
-__all__ = ["CsvHandler", "JsonDocumentHandler", "JsonlHandler", "LogHandler"]
+__all__ = ["CsvHandler", "JsonDocumentHandler", "JsonlHandler", "LogHandler", "TextHandler"]

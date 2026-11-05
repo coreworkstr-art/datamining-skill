@@ -75,9 +75,13 @@ _FIELD_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_ \-]{0,63}")
 
 ProgressFn = Callable[[int, int, str], None]
 ProfileFn = Callable[[Path], dict[str, Any]]
-QualityFn = Callable[[Path, int], dict[str, Any]]
+QualityFn = Callable[[Path, int, int], dict[str, Any]]
 QUALITY_DEFAULT_RECORDS = 1_000_000
 QUALITY_MAX_RECORDS = 10_000_000
+# Many clients give up on a tool call after about a minute, and this server answers one request at
+# a time, so a longer check would also hold up every call after it: it stops reading after this long.
+QUALITY_DEFAULT_SECONDS = 20
+QUALITY_MAX_SECONDS = 600
 
 
 class MineRunner(Protocol):
@@ -211,8 +215,8 @@ def _profile_schema() -> dict[str, Any]:
                 "type": "string",
                 "maxLength": MAX_PATH_CHARS,
                 "description": (
-                    "File to inspect (CSV, TSV, JSON, JSONL/NDJSON or log; also gzip, bzip2, "
-                    "xz or zip compressed). Relative paths are resolved against the workspace "
+                    "File to inspect (CSV, TSV, JSON, JSONL/NDJSON, log or plain text; also gzip, "
+                    "bzip2, xz or zip compressed). Relative paths are resolved against the workspace "
                     "directory; the file must be inside an allowed directory."
                 ),
             }
@@ -243,6 +247,17 @@ def _quality_schema() -> dict[str, Any]:
                     "Stop after this many records. The call blocks until the check is done, "
                     "so keep it modest for a first look; the report says whether the whole "
                     "file was read."
+                ),
+            },
+            "max_seconds": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": QUALITY_MAX_SECONDS,
+                "default": QUALITY_DEFAULT_SECONDS,
+                "description": (
+                    "Stop reading after this many seconds and report on the records read so far "
+                    "(scope.complete is then false). Many clients give up on a tool call after "
+                    "about a minute, so raise this only if yours waits longer."
                 ),
             },
         },
@@ -489,8 +504,8 @@ class MiningTools:
                 name=TOOL_PROFILE,
                 title="Profile a data file",
                 description=(
-                    "Inspect a local data file (CSV, TSV, JSON, JSONL/NDJSON or log; gzip, bzip2, "
-                    "xz and zip files too) without reading it fully into memory. Returns the "
+                    "Inspect a local data file (CSV, TSV, JSON, JSONL/NDJSON, log or plain text; "
+                    "gzip, bzip2, xz and zip files too) without reading it fully into memory. Returns the "
                     "size, encoding, detected format, column names or JSON keys, and an "
                     "estimated record count with its unit (a CSV record can span several "
                     "lines). Runs entirely on this machine in constant memory, so it is safe "
@@ -590,8 +605,8 @@ class MiningTools:
                     "each field and schema drift (a field whose values change type, with the "
                     "line where the other type first appears). It reports counts and line "
                     "numbers, never values. Use it after profile_dataset and before mining a "
-                    "file you do not know. It stops after max_records records and says whether "
-                    "it read the whole file."
+                    "file you do not know. It stops after max_records records or max_seconds "
+                    "seconds, whichever comes first, and says whether it read the whole file."
                 ),
                 input_schema=_quality_schema(),
                 annotations={
@@ -655,7 +670,7 @@ class MiningTools:
                 fields[key] = arguments[key]
         if "pattern" in arguments:
             fields["custom_pattern"] = True  # the pattern itself is never recorded
-        for key in ("rows", "max_records"):
+        for key in ("rows", "max_records", "max_seconds"):
             if isinstance(arguments.get(key), int) and not isinstance(arguments[key], bool):
                 fields[key] = arguments[key]
         if isinstance(arguments.get("job_id"), str):
@@ -714,7 +729,11 @@ class MiningTools:
         if self._quality is None:
             raise ToolInputError("quality checks are not available in this configuration")
         source = self._existing_file(arguments["path"], "path")
-        report = self._quality(source, arguments.get("max_records", QUALITY_DEFAULT_RECORDS))
+        report = self._quality(
+            source,
+            arguments.get("max_records", QUALITY_DEFAULT_RECORDS),
+            arguments.get("max_seconds", QUALITY_DEFAULT_SECONDS),
+        )
         if not self._mask:
             return ToolOutcome(data=report)
         counts: Counter[str] = Counter()
